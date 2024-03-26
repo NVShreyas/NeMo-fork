@@ -654,7 +654,6 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                                                 fp8_format=fp8_format,
                                                 fp8_amax_history_len=self.cfg.get("fp8_amax_history_len", 1024),
                                                 fp8_amax_compute_algo=self.cfg.get("fp8_amax_compute_algo", "max"))
-            print("HERHRE")
             logging.info("Initialized FP8 debug in Transformer Engine.")
         except ImportError as e:
             logging.warning("Could not initialize TransformerEngine FP8 debug. Check installation of Megatron-LM. Running in normal mode.")
