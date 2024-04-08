@@ -74,7 +74,7 @@ from nemo.collections.nlp.parts.utils_funcs import activation_to_func, get_last_
 from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import ChannelType, NeuralType
-from nemo.utils import logging
+from nemo.utils import logging, AppState
 from nemo.utils.te_utils import is_float8tensor
 
 try:
@@ -653,12 +653,12 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
             fp8_format = "hybrid" if self.cfg.get("fp8_hybrid", True) else "e4m3"
             initialize_transformer_engine_fp8_debug(
-                self.cfg.get("pipeline_model_parallel_size", 1),
+                log_dir=AppState.exp_dir,
                 fp8_format=fp8_format,
                 fp8_amax_history_len=self.cfg.get("fp8_amax_history_len", 1024),
                 fp8_amax_compute_algo=self.cfg.get("fp8_amax_compute_algo", "max"),
             )
-            logging.info("Initialized FP8 debug in Transformer Engine.")
+            logging.info(f"Initialized FP8 debug in Transformer Engine. Logging in {AppState.exp_dir}")
         except ImportError as e:
             logging.warning(
                 "Could not initialize TransformerEngine FP8 debug. Check installation of Megatron-LM. Running in normal mode."
