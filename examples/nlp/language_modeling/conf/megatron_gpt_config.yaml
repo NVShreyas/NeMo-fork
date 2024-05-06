@@ -204,6 +204,8 @@ model:
   # A yaml file with userbuffer communicator configurations. This file should provide `method`, `dtype`, `num_sm`, `num_splits`,
   # `cga_size`, `num_splits`, `set_sm_margin`, and `aggregate` for the communicators to use custom settings.
   # If the configuration file is not provided a default setting is used for all communicators.
+  fp8_debug: False # enable debug module in Transformer Engine. Allows to log statistics debug fp8 issues.
+  fp8_debug_log_dir: ${exp_manager.explicit_log_dir} # Directory to enable fp8 debug logging.
 
   ## Flash Attention
   use_flash_attention: False # Use flash attention in self-attention module, this config does nothing when transformer_engine=True

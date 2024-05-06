@@ -72,7 +72,7 @@ from nemo.collections.nlp.parts.utils_funcs import activation_to_func, get_last_
 from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import ChannelType, NeuralType
-from nemo.utils import logging, AppState
+from nemo.utils import logging
 from nemo.utils.te_utils import is_float8tensor
 
 try:
@@ -365,7 +365,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         self.get_attention_mask_from_fusion = self.cfg.get('get_attention_mask_from_fusion', True)
         self.initialize_ub = self.cfg.get('ub_tp_comm_overlap', False)
-        self.initialize_te_fp8_debug = bool(int(os.getenv("NVTE_FP8_DEBUG", 0)))
+        self.initialize_te_fp8_debug = self.cfg.get("fp8_debug", False) #bool(int(os.getenv("NVTE_FP8_DEBUG", 0)))
         self.log_train_loss = bool(int(os.getenv("NEMO_LOG_TRAIN_LOSS", 1)))
         self.log_memory_usage = bool(int(os.getenv("NEMO_LOG_MEMORY_USAGE", 0)))
         self.loss_broadcast_src_rank = None
@@ -677,19 +677,24 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         self.initialize_ub = False
 
     def initialize_te_fp8_debug_func(self):
+        if not HAVE_MEGATRON_CORE:
+            logging.warning(
+                "TransformerEngine debug tool requires megatron-core. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt. Running in normal mode." 
+            )
+            self.initialize_te_fp8_debug = False
+            return
         try:
             from megatron.core.transformer.custom_layers.transformer_engine import (
                 initialize_transformer_engine_fp8_debug,
             )
+            logging.info(f"Initialized FP8 debug in Transformer Engine. Logging in {self.cfg.get('fp8_debug_log_dir', '.')}")
 
-            fp8_format = "hybrid" if self.cfg.get("fp8_hybrid", True) else "e4m3"
             initialize_transformer_engine_fp8_debug(
-                log_dir=AppState.exp_dir,
-                fp8_format=fp8_format,
+                log_dir=self.cfg.get("fp8_debug_log_dir", "."),
+                fp8_format="hybrid" if self.cfg.get("fp8_hybrid", True) else "e4m3",
                 fp8_amax_history_len=self.cfg.get("fp8_amax_history_len", 1024),
                 fp8_amax_compute_algo=self.cfg.get("fp8_amax_compute_algo", "max"),
             )
-            logging.info(f"Initialized FP8 debug in Transformer Engine. Logging in {AppState.exp_dir}")
         except ImportError as e:
             logging.warning(
                 "Could not initialize TransformerEngine FP8 debug. Check installation of Megatron-LM. Running in normal mode."
@@ -1424,7 +1429,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 "reset_position_ids": self.reset_position_ids,
                 "reset_attention_mask": self.reset_attention_mask,
                 "eod_mask_loss": self.eod_mask_loss,
-                "mock": mock_dataset,
+                # "mock": mock_dataset,
                 "mmap_bin_files": self.cfg.data.get("mmap_bin_files", True),
             }
 
