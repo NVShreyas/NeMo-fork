@@ -183,6 +183,7 @@ model:
   # A yaml file with userbuffer communicator configurations. This file should provide `method`, `dtype`, `num_sm`, `num_splits`,
   # `cga_size`, `num_splits`, `set_sm_margin`, and `aggregate` for the communicators to use custom settings.
   # If the configuration file is not provided a default setting is used for all communicators.
+  fp8_warmup_steps: 0
 
   ## Flash Attention
   use_flash_attention: False # Use flash attention in self-attention module, this config does nothing when transformer_engine=True

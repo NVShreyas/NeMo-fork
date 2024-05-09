@@ -181,6 +181,11 @@ class MegatronBaseModel(NLPModel):
 
         self.grad_clip_pl_default = False  # use pytorch default for gradient clipping. Default False
 
+        # set the fp8 warmup steps to skip optimizer updates
+        self.use_fp8 = cfg.get('fp8', False)
+        self.fp8_warmup_steps = cfg.get('fp8_warmup_steps', 0)
+        self.fp8_warmup_completed = False if self.use_fp8 and self.fp8_warmup_steps > 0 else True
+
         if hasattr(self._cfg, "tokenizer") or (
             hasattr(self._cfg, "encoder_tokenizer") and hasattr(self._cfg, "decoder_tokenizer")
         ):
@@ -603,6 +608,28 @@ class MegatronBaseModel(NLPModel):
 
         return init_consumed_samples
 
+    def _initialize_fp8_warmup(self, checkpoint):
+        """
+        Resuming from BF16 checkpoints: do nothing.
+        Resuming from FP8 checkpoint:
+            Check whether FP8 warmup completed.
+            If not completed:
+                Set FP8 warmup steps to the number of steps remaining.
+        """
+        if "fp8_warmup_completed" in checkpoint:
+            self.fp8_warmup_completed = bool(checkpoint["fp8_warmup_completed"])
+            if not self.fp8_warmup_completed:
+                assert "fp8_warmup_steps" in checkpoint
+                self.fp8_warmup_steps = int(checkpoint["fp8_warmup_steps"])
+                logging.info(f"FP8 warmup has not been completed. Continuing to warmup for another {self.fp8_warmup_steps} steps. ")
+            else:
+                logging.info("FP8 warmup has been completed in loaded checkpoint. Resuming training in FP8. ")
+        else:
+            logging.info(f"{self.fp8_warmup_completed}, {self.fp8_warmup_steps}")
+            logging.warning("Did not find `fp8_warmup_completed` in checkpoint. "
+                            "If you are not using warmup steps for FP8 or resuming from a BF16 checkpoint, "
+                            "you can safely ignore this warning. ")
+
     def _validate_and_override_config(self):
         """ Certain configurations might be incompatible or discouraged.
             We can check for them here and override if necessary.
@@ -845,3 +872,17 @@ class MegatronBaseModel(NLPModel):
             return iterator, True
         # reinsert the element back to the iterator
         return itertools.chain([element], iterator), False
+
+    def optimizer_step(self, *args, **kwargs):
+        if self.use_fp8 and not self.fp8_warmup_completed:
+            if self.fp8_warmup_steps > 0:
+                self.fp8_warmup_steps -= 1
+                logging.info("[FP8] Skipping optimizer step")
+                optimizer_closure = args[3]
+                optimizer_closure()
+            else:
+                self.fp8_warmup_completed = True
+                logging.info("FP8 warmup complete")
+                super().optimizer_step(*args, **kwargs)
+            return
+        super().optimizer_step(*args, **kwargs)

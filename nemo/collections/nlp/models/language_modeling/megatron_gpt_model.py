@@ -1316,6 +1316,10 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         """LightningModule hook:
         https://pytorch-lightning.readthedocs.io/en/stable/common/lightning_module.html#on-save-checkpoint
         """
+        if self.use_fp8:
+            checkpoint['fp8_warmup_completed'] = self.fp8_warmup_completed 
+            if not self.fp8_warmup_completed:
+                checkpoint["fp8_warmup_steps"] = self.fp8_warmup_steps
 
         # mcore uses distributed checkpointing
         if self.mcore_gpt:
@@ -1333,6 +1337,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         """LightningModule hook:
         https://pytorch-lightning.readthedocs.io/en/stable/common/lightning_module.html#on-load-checkpoint
         """
+        if self.use_fp8:
+            self._initialize_fp8_warmup(checkpoint)
 
         # mcore uses distributed checkpointing
         if self.mcore_gpt:
