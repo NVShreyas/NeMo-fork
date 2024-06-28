@@ -6,6 +6,7 @@ from torch import nn
 
 
 # Adapted from https://github.com/dvlab-research/LISA/blob/main/model/segment_anything/modeling/prompt_encoder.py
+# which in turn was adapted from https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py
 class PromptEncoder(nn.Module):
     def __init__(
         self,

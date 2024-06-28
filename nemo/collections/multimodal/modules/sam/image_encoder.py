@@ -4,11 +4,13 @@ import torch.functional as F
 from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone
 from nemo.collections.nlp.modules.common.megatron.utils import init_method_normal, scaled_init_method_normal
+from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
 
-
+# adapted from https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py
 class SAMVisionTransformer(MegatronModule):
     """Placeholder for ViT-H from SAM.
     Temporarily placed here.
+    # TODO: This isn't necessary if we add a SAM-head type post process plugin to ViTbackbone.
     """
     def __init__(self, model_cfg, model_parallel_config, pre_process=True, post_process=True, skip_head=False):
         scaled_init_method = (
@@ -35,6 +37,15 @@ class SAMVisionTransformer(MegatronModule):
                                     class_token=False,
                                     single_token_output=False,)
         if self.post_process:
+            # TODO: make sure this nn.LayerNorm == LayerNorm2D used in LISA.
+            self.norm1 = get_layer_norm(self.outout_dim,
+                                    model_cfg.layernorm_epsilon,
+                                    model_cfg.persist_layer_norm,
+                                    sequence_parallel=model_cfg.sequence_parallel)
+            self.norm2 = get_layer_norm(self.outout_dim,
+                                    model_cfg.layernorm_epsilon,
+                                    model_cfg.persist_layer_norm,
+                                    sequence_parallel=model_cfg.sequence_parallel)
             self.head = torch.nn.Sequential(
             torch.nn.Conv2d(
                 self.hidden_size,
@@ -42,7 +53,7 @@ class SAMVisionTransformer(MegatronModule):
                 kernel_size=1,
                 bias=False,
             ),
-            torch.nn.LayerNorm(self.output_dim), # TODO: make sure this nn.LayerNorm == LayerNorm2D used in LISA.
+            self.norm1,
             torch.nn.Conv2d(
                 self.output_dim,
                 self.output_dim,
@@ -50,7 +61,7 @@ class SAMVisionTransformer(MegatronModule):
                 padding=1,
                 bias=False,
             ),
-            torch.nn.LayerNorm(self.output_dim),
+            self.norm2,
         )
     
     def set_input_tensor(self, input_tensor):
