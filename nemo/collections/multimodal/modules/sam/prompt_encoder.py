@@ -3,11 +3,11 @@ from typing import Any, Optional, Tuple, Type
 import numpy as np
 import torch
 from torch import nn
-
+from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 
 # Adapted from https://github.com/dvlab-research/LISA/blob/main/model/segment_anything/modeling/prompt_encoder.py
 # which in turn was adapted from https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py
-class PromptEncoder(nn.Module):
+class PromptEncoder(MegatronModule):
     def __init__(
         self,
         embed_dim: int,
@@ -30,11 +30,12 @@ class PromptEncoder(nn.Module):
           activation (nn.Module): The activation to use when encoding
             input masks.
         """
-        super().__init__()
+        super(PromptEncoder, self).__init__()
         self.embed_dim = embed_dim
         self.input_image_size = input_image_size
         self.image_embedding_size = image_embedding_size
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2)
+        self.frozen = False
 
         self.num_point_embeddings: int = 4  # pos/neg point + 2 box corners
         point_embeddings = [
@@ -130,6 +131,20 @@ class PromptEncoder(nn.Module):
 
     def _get_device(self) -> torch.device:
         return self.point_embeddings[0].weight.device
+
+    def train(self, mode):
+        if self.frozen:
+            return self
+        
+        super().train(mode)
+        return self
+    
+    def freeze(self) -> None:
+        for param in self.parameters():
+            param.requires_grad = False
+        
+        self.eval()
+        self.frozen = True
 
     def forward(
         self,

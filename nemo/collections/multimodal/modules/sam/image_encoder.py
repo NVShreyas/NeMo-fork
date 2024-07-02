@@ -12,7 +12,13 @@ class SAMVisionTransformer(MegatronModule):
     Temporarily placed here.
     # TODO: This isn't necessary if we add a SAM-head type post process plugin to ViTbackbone.
     """
-    def __init__(self, model_cfg, model_parallel_config, pre_process=True, post_process=True, skip_head=False):
+    def __init__(self, 
+                 model_cfg, 
+                 model_parallel_config, 
+                 pre_process=True, 
+                 post_process=True, 
+                 skip_head=False):
+        super(SAMVisionTransformer, self).__init__()
         scaled_init_method = (
             scaled_init_method_normal(model_cfg.init_method_std, model_cfg.num_layers)
             if model_cfg.use_scaled_init_method
@@ -25,6 +31,7 @@ class SAMVisionTransformer(MegatronModule):
         self.pre_process = pre_process
         self.post_process = post_process
         self.skip_head = skip_head
+        self.frozen = False
 
         assert model_cfg.get("preprocess_layernorm", False), "SAM ViT must use preprocess layernorm = True."
 
@@ -64,6 +71,20 @@ class SAMVisionTransformer(MegatronModule):
             self.norm2,
         )
     
+    def train(self, mode):
+        if self.frozen:
+            return self
+        
+        super().train(mode)
+        return self
+
+    def freeze(self) -> None:
+        for param in self.parameters():
+            param.requires_grad = False
+        
+        self.eval()
+        self.frozen = True
+
     def set_input_tensor(self, input_tensor):
         """See megatron.model.transformer.set_input_tensor()"""
         self.backbone.set_input_tensor(input_tensor)

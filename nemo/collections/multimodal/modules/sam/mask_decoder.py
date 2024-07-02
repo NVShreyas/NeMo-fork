@@ -5,9 +5,10 @@ from torch import nn
 from torch.nn import functional as F
 
 from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
+from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 
 
-class MaskDecoder(nn.Module):
+class MaskDecoder(MegatronModule):
     def __init__(
         self,
         *,
@@ -35,9 +36,10 @@ class MaskDecoder(nn.Module):
           iou_head_hidden_dim (int): the hidden dimension of the MLP
             used to predict mask quality
         """
-        super().__init__()
+        super(MaskDecoder, self).__init__()
         self.transformer_dim = transformer_dim
         self.transformer = transformer
+        self.frozen = False
 
         self.num_multimask_outputs = num_multimask_outputs
 
@@ -69,6 +71,20 @@ class MaskDecoder(nn.Module):
         self.iou_prediction_head = MaskDecoderFFN(
             transformer_dim, iou_head_hidden_dim, self.num_mask_tokens, iou_head_depth
         )
+
+    def train(self, mode):
+        if self.frozen:
+            return self
+        
+        super().train(mode)
+        return self
+    
+    def freeze(self) -> None:
+        for param in self.parameters():
+            param.requires_grad = False
+        
+        self.eval()
+        self.frozen = True
 
     def forward(
         self,
