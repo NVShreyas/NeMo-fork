@@ -7,8 +7,8 @@ from torch.nn import functional as F
 from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
 from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 
-
-class MaskDecoder(MegatronModule):
+# MegatronModule
+class MaskDecoder(nn.Module):
     def __init__(
         self,
         *,
