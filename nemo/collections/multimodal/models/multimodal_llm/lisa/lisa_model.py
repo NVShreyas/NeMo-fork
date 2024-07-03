@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.functional as F
 
 from omegaconf.dictconfig import DictConfig
+from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import MegatronPretrainingSampler
+from nemo.collections.vision.data.megatron.data_samplers import MegatronVisionPretrainingRandomSampler
 from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.modules.common.megatron.utils import init_method_normal, scaled_init_method_normal
@@ -13,7 +15,11 @@ from nemo.collections.multimodal.modules.sam.prompt_encoder import PromptEncoder
 from nemo.collections.multimodal.modules.sam.mask_decoder import MaskDecoder
 from nemo.collections.multimodal.modules.sam.two_way_transformer import TwoWayTransformer
 from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MCoreNevaModel, MegatronNevaModel
-from nemo.collections.nlp.models.nlp_model import NLPModel
+from nemo.collections.multimodal.data.neva.conversation import DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN
+from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import get_specs
+from nemo.utils import logging
+from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset, collate_fn
+from nemo.collections.multimodal.parts.utils import load_nemo_model_weights
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -24,7 +30,7 @@ except (ImportError, ModuleNotFoundError):
     HAVE_APEX = False
 
 try:
-    from megatron.core import parallel_state
+    from megatron.core import parallel_state, tensor_parallel
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
     HAVE_MEGATRON_CORE = True
@@ -40,8 +46,8 @@ class SAM:
     Mask decoder is trainable.
     """
     #NOTE: this should take model parallel config as well.
-    def __init__(self, sam_cfg):
-        self.sam_cfg = sam_cfg
+    def __init__(self, model_config):
+        sam_cfg = model_config.mm_cfg.sam_extra_args
 
         self.image_encoder = ImageEncoderViT(
             depth=sam_cfg.encoder.image_encoder_depth,
@@ -63,6 +69,7 @@ class SAM:
                                             input_image_size=(sam_cfg.encoder.image_size, sam_cfg.encoder.image_size), 
                                             mask_in_chans=16)
         self.mask_decoder = MaskDecoder(
+                        model_config=model_config,
                         num_multimask_outputs=3,
                         transformer=TwoWayTransformer(
                             depth=sam_cfg.decoder.depth,
@@ -133,12 +140,12 @@ class SAM:
 
 
 class LisaBaseModel:
-    def __init__(self, model_config):
+    def __init__(self, model_config, **kwargs):
         mm_cfg = model_config.mm_cfg
         # sam_cfg = NLPModel.restore_from(mm_cfg.sam.from_pretrained, return_config=True)
         assert "sam_extra_args" in mm_cfg
-        self.sam = SAM(mm_cfg.sam_extra_args)
-        if mm_cfg.sam_extra_args.from_pretrained is not None:
+        self.sam = SAM(model_config)
+        if mm_cfg.sam_extra_args.from_pretrained != "":
             # NOTE: if we want to load encoder and decoder separately then change this
             self.load_sam_weights(self.sam, mm_cfg.sam_extra_args.from_pretrained)
         self.sam.freeze(mm_cfg)
@@ -156,7 +163,18 @@ class LisaBaseModel:
         self.text_hidden_fcs.train()
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
-        
+    
+    def _load_model_weights(self, nemo_path):
+        """
+        Shared method to load model weights from a given nemo_path.
+        """
+        sharded_state_dict = None
+        if getattr(self, "sharded_state_dict", None) is not None:
+            sharded_state_dict = self.sharded_state_dict(prefix="model.")
+        state_dict, self.is_dist_ckpt = load_nemo_model_weights(nemo_path, sharded_state_dict)
+
+        return state_dict
+
     def load_sam_weights(self, sam, nemo_path: str):
         state_dict = self._load_model_weights(nemo_path)
         print(state_dict)
@@ -167,6 +185,7 @@ class MCoreLisaModel(MCoreNevaModel):
                  model_config,
                  media_start_id,
                  media_end_id,
+                 seg_token_id,
                  mcore_gpt,
                  **kwargs):
         super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
@@ -174,10 +193,26 @@ class MCoreLisaModel(MCoreNevaModel):
                                             media_end_id,
                                             mcore_gpt, 
                                             **kwargs)
-        # self.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+        self.seg_token_id = seg_token_id
         self.model = LisaBaseModel(model_config, **kwargs)
 
+        # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
+        # self.output_layer = tensor_parallel.ColumnParallelLinear(
+        #         self.model_config.hidden_size,
+        #         vocab_size=kwargs["vocab_size"],
+        #         config=kwargs["config"],
+        #         init_method=self.model_config.init_method,
+        #         bias=False,
+        #         skip_bias_add=False,
+        #         gather_output=not self.parallel_output,
+        #         skip_weight_param_allocation=self.pre_process
+        #         and self.share_embeddings_and_output_weights,
+        #         embedding_activation_buffer=self.embedding_activation_buffer,
+        #         grad_output_buffer=self.grad_output_buffer,
+        #     )
+
     def forward(self, *args, **kwargs):
+        # Inputs:
         # images: torch.FloatTensor,
         # images_clip: torch.FloatTensor,
         # input_ids: torch.LongTensor,
@@ -192,7 +227,7 @@ class MCoreLisaModel(MCoreNevaModel):
         input_ids = kwargs.get('input_ids', None)
         image_embeddings = self.model.sam.get_visual_embs(images)
 
-        seg_token_mask = input_ids[:, 1:] == self.seg_token_idx # TODO
+        seg_token_mask = input_ids[:, 1:] == self.seg_token_id
         seg_token_mask = torch.cat(
             [
                 seg_token_mask,
@@ -206,7 +241,9 @@ class MCoreLisaModel(MCoreNevaModel):
             dim=1,
         )
 
+        images_clip = kwargs.get("images_clip", None)
         images_clip_list = []
+        offset = kwargs.get("offset", None)
         for i in range(len(offset) - 1):
             start_i, end_i = offset[i], offset[i + 1]
             images_clip_i = (
@@ -218,9 +255,14 @@ class MCoreLisaModel(MCoreNevaModel):
             images_clip_list.append(images_clip_i)
         images_clip = torch.cat(images_clip_list, dim=0)
 
+        # This is hidden states from McoreGPT
         neva_output = super().forward(*args, **kwargs)
 
         hidden_states = []
+        # TODO: verify [-1]
+        # Llava in HF returns hiddens states per layer (https://huggingface.co/docs/transformers/main/en/model_doc/llama#transformers.LlamaModel:~:text=up%20sequential%20decoding.-,hidden_states,-(tuple(torch))
+        # I think [-1] returns hidden state of last layer in HF models
+        # We don't have to do this. We just have to make sure we are getting the hidden states from the last PP stage in MCore.
         hidden_states.append(self.model.text_hidden_fcs[0](neva_output[-1]))
         
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
@@ -242,6 +284,8 @@ class MCoreLisaModel(MCoreNevaModel):
 
         multimask_output = False
         pred_masks = []
+        resize_list = kwargs.get("resize_list", None)
+        label_list = kwargs.get("label_list", None)
         # TODO: why loop if it happens for every sample in batch?
         for i in range(len(pred_embeddings)):
             (
@@ -268,5 +312,169 @@ class MCoreLisaModel(MCoreNevaModel):
             )
             pred_masks.append(pred_mask[:, 0])
         
+        inference = kwargs.get("inference", None)
         # return pred_masks if inference
         # else calculate loss
+
+
+class MegatronLisaModel(MegatronNevaModel):
+    def __init__(self, cfg: DictConfig, trainer: Trainer):
+        super().__init__(cfg, trainer)
+        print(cfg)
+    
+    def model_provider_func(self, pre_process, post_process):
+        llm_type = self.cfg.mm_cfg.llm.get("model_type", "nvgpt")
+        media_start_id = self.tokenizer.token_to_id(DEFAULT_IM_START_TOKEN[llm_type])
+        media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
+        seg_token_id = self.tokenizer.token_to_id("[SEG]")
+
+        if not parallel_state.is_initialized():
+            def dummy():
+                return
+
+            if self.trainer.strategy.launcher is not None:
+                self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+            self.trainer.strategy.setup_environment()
+
+        # need to override this since MCoreGPTModel returns loss or logits if pp last stage.
+        # We need the hidden states to input into the SAM decoder
+        # Caveat: Calculate pplx loss in LISA
+        # Possible solution: update mcore gpt to return everything
+        post_process = False
+
+        model = MCoreLisaModel(
+            model_config=self.cfg,
+            media_start_id=media_start_id,
+            media_end_id=media_end_id,
+            mcore_gpt=True,
+            seg_token_id=seg_token_id,
+            # need the following for Neva
+            config=self.transformer_config,
+            transformer_layer_spec=get_specs(self.spec_name),
+            vocab_size=self.cfg.get('override_vocab_size', self.padded_vocab_size),
+            max_sequence_length=self.cfg.get('encoder_seq_length', 512),
+            pre_process=pre_process,
+            post_process=post_process,
+            parallel_output=True,
+            share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True),
+            position_embedding_type=self.cfg.get('position_embedding_type', 'learned_absolute'),
+            rotary_percent=self.cfg.get('rotary_percentage', 1.0),
+            seq_len_interpolation_factor=self.cfg.get('seq_len_interpolation_factor', None),
+            rotary_base=self.cfg.get('rotary_base', 10000),
+        )
+        logging.info(
+            f"Lisa model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
+        )
+
+        return model
+    
+    def setup_optimizer_param_groups(self):
+        if self.cfg.mm_cfg.llm.freeze:
+            # this will freeze neva(llm) and clip-vit is already frozen
+            # This should also filter out params that don't have grad like SAM encoder
+            super().setup_optimizer_param_groups()
+        else:
+            return NotImplemented
+
+    def forward(self, tokens, text_position_ids, attention_mask, labels, media=None):
+        forward_args = {
+            'input_ids': tokens,
+            'position_ids': text_position_ids,
+            'attention_mask': attention_mask,
+            'labels': labels,
+            'media': media,
+        }
+        output_tensor = self.model(**forward_args)
+        return output_tensor
+
+    
+    # TODO: probably have to override cause of new losses
+    def training_step(self, dataloader_iter):
+        return super().training_step(dataloader_iter)
+
+    # TODO: probably have to override cause of new losses
+    def validation_step(self, dataloader_iter):
+        return super().validation_step(dataloader_iter)
+    
+    def setup(self, stage=None):
+        # This sets up datasets internally
+        super().setup(stage)
+    
+    def build_train_valid_test_datasets(self):
+        logging.info("Building LISA datasets - only reason seg dataset supported for now.")
+
+        image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
+
+        self._train_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
+                         tokenizer=self.tokenizer,
+                         image_processor=image_processor,
+                         samples_per_epoch=self.cfg.micro_batch_size,
+                         image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
+                         reason_seg_data="reasonseg|train")
+        
+        self._validation_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
+                            tokenizer=self.tokenizer,
+                            image_processor=image_processor,
+                            samples_per_epoch=self.cfg.micro_batch_size,
+                            image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
+                            reason_seg_data="reasonseg|val",
+                            explanatory=-1)
+        
+        return self._train_ds, self._validation_ds
+
+    def build_pretraining_data_loader(
+        self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False
+    ):
+        """Buld dataloader given an input dataset."""
+
+        logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
+        # Megatron sampler
+        if parallel_state.get_pipeline_model_parallel_world_size() == 1:
+            micro_batch_size = self.cfg.micro_batch_size
+        else:
+            micro_batch_size = self.cfg.global_batch_size // parallel_state.get_data_parallel_world_size()
+
+        if hasattr(self.cfg.data, 'dataloader_type') and self.cfg.data.dataloader_type is not None:
+            if self.cfg.data.dataloader_type == 'single':
+                batch_sampler = MegatronPretrainingSampler(
+                    total_samples=len(dataset),
+                    consumed_samples=consumed_samples,
+                    micro_batch_size=micro_batch_size,
+                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
+                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
+                    drop_last=drop_last,
+                    global_batch_size=self.cfg.global_batch_size,
+                    pad_samples_to_global_batch_size=pad_samples_to_global_batch_size,
+                )
+            elif self.cfg.data.dataloader_type == 'cyclic':
+                batch_sampler = MegatronVisionPretrainingRandomSampler(
+                    dataset=dataset,
+                    total_samples=len(dataset),
+                    consumed_samples=consumed_samples,
+                    micro_batch_size=micro_batch_size,
+                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
+                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
+                    drop_last=self.cfg.get('drop_last', True),
+                    data_sharding=False,
+                )
+            else:
+                raise ValueError('cfg.data.dataloader_type must be "single" or "cyclic"')
+        else:
+            raise ValueError('cfg.data.dataloader_type not found. Must be "single" or "cyclic"')
+
+        collate_func = partial(
+            collate_fn,
+            tokenizer=self.tokenizer,
+            conv_type=self.cfg.data.conv_template,
+            use_mm_start_end=True,
+            seq_len=self.cfg.encoder_seq_length,
+        )
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=collate_func,
+            num_workers=self.cfg.data.num_workers,
+            pin_memory=True,
+            persistent_workers=True if self.cfg.data.num_workers > 0 else False,
+        )
+

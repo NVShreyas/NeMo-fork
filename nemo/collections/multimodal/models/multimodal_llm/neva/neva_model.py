@@ -435,12 +435,19 @@ class MCoreNevaModel(MCoreGPTModel, NevaBaseModel):
         MCoreGPTModel.__init__(self, **kwargs)
         NevaBaseModel.__init__(self, mm_cfg, media_start_id, media_end_id, mcore_gpt, **kwargs)
 
+        self.post_process = kwargs["post_process"]
+
     def freeze_llm(self, mm_cfg):
         if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
             embedding_parameters = self.embedding.parameters()
         else:
             embedding_parameters = {}
-        if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
+
+        # We don't want to add a postprocess step even if its last PP stage since for LISA/other MM
+        # we want to return the hiddent states. Returning only hidden states is not supported in mcore.
+        # so output layer is never initialized.
+        # TODO: move to McoreLisaModel
+        if parallel_state.is_pipeline_last_stage(ignore_virtual=True) and self.post_process:
             output_layer_parameters = self.output_layer.parameters()
         else:
             output_layer_parameters = {}

@@ -16,7 +16,7 @@
 import torch.multiprocessing as mp
 from omegaconf.omegaconf import OmegaConf
 
-from nemo.collections.multimodal.models.multimodal_llm.lisa.lisa_model import MCoreLisaModel
+from nemo.collections.multimodal.models.multimodal_llm.lisa.lisa_model import MegatronLisaModel
 from nemo.collections.nlp.parts.megatron_trainer_builder import MegatronTrainerBuilder
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
@@ -33,7 +33,7 @@ def main(cfg) -> None:
     trainer = MegatronTrainerBuilder(cfg).create_trainer()
     exp_manager(trainer, cfg.exp_manager)
 
-    model = MCoreLisaModel(cfg.model, trainer)
+    model = MegatronLisaModel(cfg.model, trainer)
 
     trainer.fit(model)
 

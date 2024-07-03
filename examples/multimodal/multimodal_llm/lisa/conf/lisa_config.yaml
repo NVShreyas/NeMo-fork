@@ -131,7 +131,7 @@ model:
   layernorm_epsilon: 1e-5
   do_layer_norm_weight_decay: False # True means weight decay on all params
   pre_process: True # add embedding
-  post_process: True # add pooler
+  post_process: False # add pooler
   persist_layer_norm: True # Use of persistent fused layer norm kernel.
   bias: False # Whether to use bias terms in all weight matrices.
   activation: 'fast-swiglu' # Options ['gelu', 'geglu', 'swiglu', 'reglu', 'squared-relu', 'fast-geglu', 'fast-swiglu', 'fast-reglu']
@@ -214,7 +214,7 @@ model:
     is_multimodal: True
     media_type: image # currently supported: image
     sep_image_conv_front: False
-    conv_template: ${model.mm_cfg.llm.model_type} # check `nemo/collections/multimodal/data/neva/conversation.py`
+    conv_template: "llava_v1" # check `nemo/collections/multimodal/data/neva/conversation.py`
     image_folder: null
     image_aspect_ratio: 'square'
 
