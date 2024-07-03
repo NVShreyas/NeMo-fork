@@ -132,7 +132,7 @@ def collate_fn(
     return {
         "media": torch.stack(images_list, dim=0),
         "images_clip": torch.stack(images_clip_list, dim=0),
-        "input_ids": input_ids,
+        "tokens": input_ids,
         "labels": targets,
         "attention_masks": attention_masks,
         "masks_list": masks_list,
