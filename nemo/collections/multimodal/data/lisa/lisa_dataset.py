@@ -93,12 +93,9 @@ def collate_fn(
         sep = "[/INST] "
 
     for conversation, target in zip(conversation_list, targets):
-        print(conversation)
         total_len = int(target.ne(tokenizer.pad_id).sum())
-        print(total_len)
 
         rounds = conversation.split(conv.sep2)
-        print(rounds)
         cur_len = 1
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
