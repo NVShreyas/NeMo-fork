@@ -40,13 +40,14 @@ except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE = False
 
 
-class SAM:
+class SAM(nn.Module):
     """
     Frozen variant of SAM with helper functions.
     Mask decoder is trainable.
     """
     #NOTE: this should take model parallel config as well.
     def __init__(self, model_config):
+        super().__init__()
         sam_cfg = model_config.mm_cfg.sam_extra_args
 
         self.image_encoder = ImageEncoderViT(
@@ -145,6 +146,10 @@ class LisaBaseModel:
         # sam_cfg = NLPModel.restore_from(mm_cfg.sam.from_pretrained, return_config=True)
         assert "sam_extra_args" in mm_cfg
         self.sam = SAM(model_config)
+        logging.info(
+            f"Initialized SAM model with {sum(p.numel() for p in self.sam.parameters() if p.requires_grad)} trainable parameters"
+        )
+
         if mm_cfg.sam_extra_args.from_pretrained != "":
             # NOTE: if we want to load encoder and decoder separately then change this
             self.load_sam_weights(self.sam, mm_cfg.sam_extra_args.from_pretrained)
