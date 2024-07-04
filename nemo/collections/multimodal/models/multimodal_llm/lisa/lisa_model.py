@@ -104,6 +104,14 @@ class SAM(nn.Module):
             image_embeddings = torch.cat(image_embeddings_list, 0)
         return image_embeddings
     
+    def log_params(self):
+        logging.info(
+            f"Initialized SAM model with {sum(p.numel() for p in self.parameters())} parameters\n"
+            f"SAM image encoder: {sum(p.numel() for p in self.image_encoder.parameters())} parameters. Frozen: {self.image_encoder.frozen}.\n"
+            f"SAM prompt encoder: {sum(p.numel() for p in self.prompt_encoder.parameters())} parameters. Frozen: {self.prompt_encoder.frozen}.\n"
+            f"SAM mask decoder: {sum(p.numel() for p in self.mask_decoder.parameters())} parameters. Frozen: {self.mask_decoder.frozen}.\n"
+        )
+    
     def postprocess_masks(
         self,
         masks: torch.Tensor,
@@ -146,14 +154,13 @@ class LisaBaseModel:
         # sam_cfg = NLPModel.restore_from(mm_cfg.sam.from_pretrained, return_config=True)
         assert "sam_extra_args" in mm_cfg
         self.sam = SAM(model_config)
-        logging.info(
-            f"Initialized SAM model with {sum(p.numel() for p in self.sam.parameters() if p.requires_grad)} trainable parameters"
-        )
 
         if mm_cfg.sam_extra_args.from_pretrained != "":
             # NOTE: if we want to load encoder and decoder separately then change this
             self.load_sam_weights(self.sam, mm_cfg.sam_extra_args.from_pretrained)
         self.sam.freeze(mm_cfg)
+
+        self.sam.log_params()
 
         # Projection layer
         in_dim = model_config.hidden_size
@@ -185,7 +192,7 @@ class LisaBaseModel:
         print(state_dict)
 
 
-class MCoreLisaModel(MCoreNevaModel):
+class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
     def __init__(self, 
                  model_config,
                  media_start_id,
@@ -193,13 +200,13 @@ class MCoreLisaModel(MCoreNevaModel):
                  seg_token_id,
                  mcore_gpt,
                  **kwargs):
-        super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
+        MCoreNevaModel.__init__(self, model_config.mm_cfg,
                                             media_start_id,
                                             media_end_id,
                                             mcore_gpt, 
                                             **kwargs)
+        LisaBaseModel.__init__(self, model_config, **kwargs)
         self.seg_token_id = seg_token_id
-        self.model = LisaBaseModel(model_config, **kwargs)
 
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
         # self.output_layer = tensor_parallel.ColumnParallelLinear(
@@ -402,6 +409,8 @@ class MegatronLisaModel(MegatronNevaModel):
         return super().validation_step(dataloader_iter)
     
     def setup(self, stage=None):
+        #TODO: probably override it. Not sure whether # of params logged in MegatronNevaModel.setup()
+        # includes LM + Embedding (including Clip) + SAM + text to vision FC
         # This sets up datasets internally
         super().setup(stage)
     
