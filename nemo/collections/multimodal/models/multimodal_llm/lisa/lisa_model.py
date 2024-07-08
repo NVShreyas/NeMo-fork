@@ -32,7 +32,7 @@ except (ImportError, ModuleNotFoundError):
 try:
     from megatron.core import parallel_state, tensor_parallel
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-
+    from megatron.core.models.gpt import GPTModel as MCoreGPTModel
     HAVE_MEGATRON_CORE = True
 
 except (ImportError, ModuleNotFoundError):
@@ -148,8 +148,9 @@ class SAM(nn.Module):
         return masks
 
 
-class LisaBaseModel:
+class LisaBaseModel(nn.Module):
     def __init__(self, model_config, **kwargs):
+        super().__init__()
         mm_cfg = model_config.mm_cfg
         # sam_cfg = NLPModel.restore_from(mm_cfg.sam.from_pretrained, return_config=True)
         assert "sam_extra_args" in mm_cfg
@@ -191,8 +192,8 @@ class LisaBaseModel:
         state_dict = self._load_model_weights(nemo_path)
         print(state_dict)
 
-
-class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
+#class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
+class MCoreLisaModel(MCoreGPTModel):
     def __init__(self, 
                  model_config,
                  media_start_id,
@@ -200,14 +201,22 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
                  seg_token_id,
                  mcore_gpt,
                  **kwargs):
-        MCoreNevaModel.__init__(self, model_config.mm_cfg,
-                                            media_start_id,
-                                            media_end_id,
-                                            mcore_gpt, 
-                                            **kwargs)
-        LisaBaseModel.__init__(self, model_config, **kwargs)
+        MCoreGPTModel.__init__(self, **kwargs)
+        #MCoreNevaModel.__init__(self, model_config.mm_cfg,
+        #super().__init__()
+        # super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
+        #                                     media_start_id,
+        #                                     media_end_id,
+        #                                     mcore_gpt,
+        #                                     **kwargs)
+        #LisaBaseModel.__init__(self, model_config, **kwargs)
+        self.lisa_sam = LisaBaseModel(model_config, **kwargs)
+        self.lisa_neva = MCoreNevaModel(model_config.mm_cfg,
+                                        media_start_id,
+                                        media_end_id,
+                                        mcore_gpt,
+                                        **kwargs)
         self.seg_token_id = seg_token_id
-
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
         # self.output_layer = tensor_parallel.ColumnParallelLinear(
         #         self.model_config.hidden_size,
@@ -234,7 +243,6 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
         # masks_list: List[torch.FloatTensor],
         # label_list: List[torch.Tensor],
         # resize_list: List[tuple],
-
         images = kwargs.get('media', None)
         input_ids = kwargs.get('input_ids', None)
         image_embeddings = self.model.sam.get_visual_embs(images)
@@ -416,8 +424,7 @@ class MegatronLisaModel(MegatronNevaModel):
     
     def build_train_valid_test_datasets(self):
         logging.info("Building LISA datasets - only reason seg dataset supported for now.")
-
-        image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
+        image_processor = self.model.module.lisa_neva.image_processor if hasattr(self.model, "module") else self.model.lisa_neva.image_processor
 
         self._train_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
                          tokenizer=self.tokenizer,

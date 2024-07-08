@@ -185,7 +185,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         images = []
         images_split = glob.glob(
             os.path.join(
-                base_image_dir, "reasonseg", self.split, "*.jpg"
+                base_image_dir, self.split, "*.jpg"
             )
         )
         images.extend(images_split)
@@ -200,7 +200,6 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             with open(
                 os.path.join(
                     base_image_dir,
-                    "reasonseg",
                     "explanatory",
                     "train.json",
                 )
