@@ -194,7 +194,7 @@ class LisaBaseModel(nn.Module):
         print(state_dict)
 
 
-class MCoreLisaModel(MCoreGPTModel):
+class MCoreLisaModel(MCoreNevaModel):
     def __init__(self, 
                  model_config,
                  media_start_id,
@@ -202,8 +202,12 @@ class MCoreLisaModel(MCoreGPTModel):
                  seg_token_id,
                  mcore_gpt,
                  **kwargs):
-        MCoreGPTModel.__init__(self, **kwargs)
-        #MCoreNevaModel.__init__(self, model_config.mm_cfg,
+        # MCoreGPTModel.__init__(self, **kwargs)
+        MCoreNevaModel.__init__(self, model_config.mm_cfg,
+                                        media_start_id,
+                                        media_end_id,
+                                        mcore_gpt,
+                                        **kwargs)
         #super().__init__()
         # super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
         #                                     media_start_id,
@@ -212,11 +216,11 @@ class MCoreLisaModel(MCoreGPTModel):
         #                                     **kwargs)
         #LisaBaseModel.__init__(self, model_config, **kwargs)
         self.lisa_sam = LisaBaseModel(model_config, **kwargs)
-        self.lisa_neva = MCoreNevaModel(model_config.mm_cfg,
-                                        media_start_id,
-                                        media_end_id,
-                                        mcore_gpt,
-                                        **kwargs)
+        # self.lisa_neva = MCoreNevaModel(model_config.mm_cfg,
+        #                                 media_start_id,
+        #                                 media_end_id,
+        #                                 mcore_gpt,
+        #                                 **kwargs)
         self.seg_token_id = seg_token_id
         
         if model_config.precision in ['bf16', 'bf16-mixed']:
@@ -269,22 +273,23 @@ class MCoreLisaModel(MCoreGPTModel):
             start_i, end_i = offset[i], offset[i + 1]
             images_clip_i = (
                 images_clip[i]
-                .unsqueeze(0)
-                .expand(end_i - start_i, -1, -1, -1)
+                .expand(end_i - start_i, -1, -1, -1, -1)
                 .contiguous()
             )
             images_clip_list.append(images_clip_i)
-        images_clip = torch.cat(images_clip_list, dim=0)
-
+        images_clip = torch.stack(images_clip_list, dim=0)
+        print(images_clip.shape)
 
         resize_list = kwargs.pop("resize_list", None)
         label_list = kwargs.pop("label_list", None)
         masks_list = kwargs.pop("masks_list", None)
 
         kwargs["media"] = images_clip
+        print(args, kwargs.keys())
 
         # This is hidden states from McoreGPT
-        neva_output = self.lisa_neva(*args, **kwargs)
+        neva_output = super().forward(*args, **kwargs)
+        
 
         hidden_states = []
         # TODO: verify [-1]
@@ -412,6 +417,7 @@ class MegatronLisaModel(MegatronNevaModel):
             f"Lisa model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
         )
         
+        print([n for n, p in model.named_parameters()])
 
         return model
     
@@ -426,9 +432,9 @@ class MegatronLisaModel(MegatronNevaModel):
     def forward(self, images, 
                 images_clip, 
                 tokens,
-                # position_ids,
+                position_ids,
                 labels, 
-                attention_mask, 
+                attention_mask,
                 offset, 
                 masks_list, 
                 label_list, 
@@ -436,7 +442,7 @@ class MegatronLisaModel(MegatronNevaModel):
         
         forward_args = {
             'input_ids': tokens,
-            # 'position_ids': position_ids,
+            'position_ids': position_ids,
             'attention_mask': attention_mask,
             'labels': labels,
             'media': images_clip, # since neva uses media and need clip processed
@@ -444,7 +450,7 @@ class MegatronLisaModel(MegatronNevaModel):
             'masks_list': masks_list,
             "label_list": label_list,
             "resize_list": resize_list,
-            "images": images
+            "images": images,
         }
         output_tensor = self.model(**forward_args)
         return output_tensor
@@ -467,7 +473,7 @@ class MegatronLisaModel(MegatronNevaModel):
     def build_train_valid_test_datasets(self):
         logging.info("Building LISA datasets - only reason seg dataset supported for now.")
 
-        image_processor = self.model.module.lisa_neva.image_processor if hasattr(self.model, "module") else self.model.lisa_neva.image_processor
+        image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
 
         self._train_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
                          tokenizer=self.tokenizer,
@@ -562,7 +568,7 @@ class MegatronLisaModel(MegatronNevaModel):
 
             forward_args = {
                 'input_ids': batch['tokens'],
-                # 'position_ids': batch['position_ids'],
+                'position_ids': batch['position_ids'],
                 'attention_mask': batch['attention_mask'],
                 'labels': batch['labels'],
                 'media': batch.get('images_clip', None),

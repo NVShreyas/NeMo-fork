@@ -7,10 +7,12 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import default_collate
+from einops import rearrange
 
 from nemo.collections.multimodal.data.neva import conversation as conversation_lib
+from nemo.collections.multimodal.data.neva.neva_dataset import LazySupervisedDataset
 from nemo.collections.multimodal.data.common.image_transforms import ResizeLongestSide
+from nemo.collections.nlp.modules.common.megatron.utils import get_ltor_masks_and_position_ids
 
 from nemo.collections.multimodal.data.lisa.utils import (
     get_mask_from_json, 
@@ -117,16 +119,33 @@ def collate_fn(
             targets = targets[:, :truncate_len]
             attention_masks = attention_masks[:, :truncate_len]
 
+    print(input_ids, targets)
+    import pdb; pdb.set_trace()
+
+    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                data=input_ids,
+                eod_token=tokenizer.eos_id,
+                eod_mask_loss=False,
+                reset_attention_mask=False,
+                reset_position_ids=False,
+            )
+
+    images = torch.stack(images_list, dim=0)
+    images_clip = torch.stack(images_clip_list, dim=0)
+    
+    images_clip = rearrange(images_clip, "b c h w -> b 1 1 c h w")
+
     data = {
-        "images": torch.stack(images_list, dim=0),
-        "images_clip": torch.stack(images_clip_list, dim=0),
+        "images": images,
+        "images_clip": images_clip,
         "tokens": input_ids,
         "labels": targets,
-        "attention_mask": attention_masks,
+        "attention_mask": attention_mask,
         "masks_list": torch.stack(masks_list, dim=0),
         "label_list": torch.stack(label_list, dim=0),
         "resize_list": torch.stack(resize_list, dim=0),
         "offset": torch.LongTensor(offset_list),
+        "position_ids": position_ids,
         # "questions_list": questions_list,
         # "sampled_classes_list": sampled_classes_list,
         # "conversation_list": conversation_list,
@@ -173,7 +192,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         images = []
         images_split = glob.glob(
             os.path.join(
-                base_image_dir, "reasonseg", self.split, "*.jpg"
+                base_image_dir, self.split, "*.jpg"
             )
         )
         images.extend(images_split)
@@ -188,7 +207,6 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             with open(
                 os.path.join(
                     base_image_dir,
-                    "reasonseg",
                     "explanatory",
                     "train.json",
                 )

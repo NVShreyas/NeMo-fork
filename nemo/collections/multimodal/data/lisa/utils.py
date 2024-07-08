@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 
-IGNORE_INDEX = -100
+IGNORE_INDEX = -1
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
 # Updated to follow neva
