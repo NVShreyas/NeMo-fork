@@ -2,7 +2,7 @@ from typing import Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 
 from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone

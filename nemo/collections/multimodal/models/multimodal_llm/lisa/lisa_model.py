@@ -2,7 +2,7 @@ from functools import partial
 from typing import Tuple
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 
 from omegaconf.dictconfig import DictConfig
 from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import MegatronPretrainingSampler
@@ -32,6 +32,7 @@ except (ImportError, ModuleNotFoundError):
 try:
     from megatron.core import parallel_state, tensor_parallel
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+    from megatron.core.models.gpt import GPTModel as MCoreGPTModel
 
     HAVE_MEGATRON_CORE = True
 
@@ -148,8 +149,9 @@ class SAM(nn.Module):
         return masks
 
 
-class LisaBaseModel:
+class LisaBaseModel(nn.Module):
     def __init__(self, model_config, **kwargs):
+        super().__init__()
         mm_cfg = model_config.mm_cfg
         # sam_cfg = NLPModel.restore_from(mm_cfg.sam.from_pretrained, return_config=True)
         assert "sam_extra_args" in mm_cfg
@@ -192,7 +194,7 @@ class LisaBaseModel:
         print(state_dict)
 
 
-class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
+class MCoreLisaModel(MCoreGPTModel):
     def __init__(self, 
                  model_config,
                  media_start_id,
@@ -200,14 +202,32 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
                  seg_token_id,
                  mcore_gpt,
                  **kwargs):
-        MCoreNevaModel.__init__(self, model_config.mm_cfg,
-                                            media_start_id,
-                                            media_end_id,
-                                            mcore_gpt, 
-                                            **kwargs)
-        LisaBaseModel.__init__(self, model_config, **kwargs)
+        MCoreGPTModel.__init__(self, **kwargs)
+        #MCoreNevaModel.__init__(self, model_config.mm_cfg,
+        #super().__init__()
+        # super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
+        #                                     media_start_id,
+        #                                     media_end_id,
+        #                                     mcore_gpt,
+        #                                     **kwargs)
+        #LisaBaseModel.__init__(self, model_config, **kwargs)
+        self.lisa_sam = LisaBaseModel(model_config, **kwargs)
+        self.lisa_neva = MCoreNevaModel(model_config.mm_cfg,
+                                        media_start_id,
+                                        media_end_id,
+                                        mcore_gpt,
+                                        **kwargs)
         self.seg_token_id = seg_token_id
-
+        
+        if model_config.precision in ['bf16', 'bf16-mixed']:
+            self.dtype = torch.bfloat16
+        elif model_config.precision in [16, '16', '16-mixed']:
+            self.dtype = torch.float16
+        elif model_config.precision in [32, '32', '32-true']:
+            self.dtype = torch.float32
+        else:
+            raise ValueError(f"Cannot recognize precision {model_config.precision}")
+        
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
         # self.output_layer = tensor_parallel.ColumnParallelLinear(
         #         self.model_config.hidden_size,
@@ -223,21 +243,10 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
         #         grad_output_buffer=self.grad_output_buffer,
         #     )
 
-    def forward(self, *args, **kwargs):
-        # Inputs:
-        # images: torch.FloatTensor,
-        # images_clip: torch.FloatTensor,
-        # input_ids: torch.LongTensor,
-        # labels: torch.LongTensor,
-        # attention_masks: torch.LongTensor,
-        # offset: torch.LongTensor,
-        # masks_list: List[torch.FloatTensor],
-        # label_list: List[torch.Tensor],
-        # resize_list: List[tuple],
-
-        images = kwargs.get('media', None)
+    def model_forward(self, *args, **kwargs):
+        images = kwargs.pop('images', None)
         input_ids = kwargs.get('input_ids', None)
-        image_embeddings = self.model.sam.get_visual_embs(images)
+        image_embeddings = self.lisa_sam.sam.get_visual_embs(images)
 
         seg_token_mask = input_ids[:, 1:] == self.seg_token_id
         seg_token_mask = torch.cat(
@@ -253,9 +262,9 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
             dim=1,
         )
 
-        images_clip = kwargs.get("images_clip", None)
+        images_clip = kwargs.get("media", None)
         images_clip_list = []
-        offset = kwargs.get("offset", None)
+        offset = kwargs.pop("offset", None)
         for i in range(len(offset) - 1):
             start_i, end_i = offset[i], offset[i + 1]
             images_clip_i = (
@@ -267,15 +276,22 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
             images_clip_list.append(images_clip_i)
         images_clip = torch.cat(images_clip_list, dim=0)
 
+
+        resize_list = kwargs.pop("resize_list", None)
+        label_list = kwargs.pop("label_list", None)
+        masks_list = kwargs.pop("masks_list", None)
+
+        kwargs["media"] = images_clip
+
         # This is hidden states from McoreGPT
-        neva_output = super().forward(*args, **kwargs)
+        neva_output = self.lisa_neva(*args, **kwargs)
 
         hidden_states = []
         # TODO: verify [-1]
         # Llava in HF returns hiddens states per layer (https://huggingface.co/docs/transformers/main/en/model_doc/llama#transformers.LlamaModel:~:text=up%20sequential%20decoding.-,hidden_states,-(tuple(torch))
         # I think [-1] returns hidden state of last layer in HF models
         # We don't have to do this. We just have to make sure we are getting the hidden states from the last PP stage in MCore.
-        hidden_states.append(self.model.text_hidden_fcs[0](neva_output[-1]))
+        hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output[-1]))
         
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         pred_embeddings = last_hidden_state[seg_token_mask]
@@ -296,37 +312,52 @@ class MCoreLisaModel(MCoreNevaModel, LisaBaseModel):
 
         multimask_output = False
         pred_masks = []
-        resize_list = kwargs.get("resize_list", None)
-        label_list = kwargs.get("label_list", None)
+        
         # TODO: why loop if it happens for every sample in batch?
         for i in range(len(pred_embeddings)):
             (
                 sparse_embeddings,
                 dense_embeddings,
-            ) = self.model.sam.prompt_encoder(
+            ) = self.lisa_sam.sam.prompt_encoder(
                 points=None,
                 boxes=None,
                 masks=None,
                 text_embeds=pred_embeddings[i].unsqueeze(1),
             )
             sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-            low_res_masks, iou_predictions = self.model.sam.mask_decoder(
+            low_res_masks, iou_predictions = self.lisa_sam.sam.mask_decoder(
                 image_embeddings=image_embeddings[i].unsqueeze(0),
-                image_pe=self.model.sam.prompt_encoder.get_dense_pe(),
+                image_pe=self.lisa_sam.sam.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
-            pred_mask = self.model.sam.postprocess_masks(
+            pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resize_list[i],
                 original_size=label_list[i].shape,
             )
             pred_masks.append(pred_mask[:, 0])
         
-        inference = kwargs.get("inference", None)
         # return pred_masks if inference
         # else calculate loss
+
+    def forward(self, *args, **kwargs):
+        # Inputs:
+        # images: torch.FloatTensor,
+        # images_clip: torch.FloatTensor,
+        # input_ids: torch.LongTensor,
+        # labels: torch.LongTensor,
+        # attention_masks: torch.LongTensor,
+        # offset: torch.LongTensor,
+        # masks_list: List[torch.FloatTensor],
+        # label_list: List[torch.Tensor],
+        # resize_list: List[tuple],
+
+        if self.dtype == torch.float32:
+            return self.model_forward(*args, **kwargs)
+        with torch.autocast(device_type="cuda", dtype=self.dtype):
+            return self.model_forward(*args, **kwargs)
 
 
 class MegatronLisaModel(MegatronNevaModel):
@@ -375,8 +406,12 @@ class MegatronLisaModel(MegatronNevaModel):
             rotary_base=self.cfg.get('rotary_base', 10000),
         )
         logging.info(
+            f"Lisa model initialized with {sum(p.numel() for p in model.parameters())} total parameters"
+        )
+        logging.info(
             f"Lisa model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
         )
+        
 
         return model
     
@@ -388,13 +423,28 @@ class MegatronLisaModel(MegatronNevaModel):
         else:
             return NotImplemented
 
-    def forward(self, tokens, text_position_ids, attention_mask, labels, media=None):
+    def forward(self, images, 
+                images_clip, 
+                tokens,
+                # position_ids,
+                labels, 
+                attention_mask, 
+                offset, 
+                masks_list, 
+                label_list, 
+                resize_list):
+        
         forward_args = {
             'input_ids': tokens,
-            'position_ids': text_position_ids,
+            # 'position_ids': position_ids,
             'attention_mask': attention_mask,
             'labels': labels,
-            'media': media,
+            'media': images_clip, # since neva uses media and need clip processed
+            'offset': offset,
+            'masks_list': masks_list,
+            "label_list": label_list,
+            "resize_list": resize_list,
+            "images": images
         }
         output_tensor = self.model(**forward_args)
         return output_tensor
@@ -417,7 +467,7 @@ class MegatronLisaModel(MegatronNevaModel):
     def build_train_valid_test_datasets(self):
         logging.info("Building LISA datasets - only reason seg dataset supported for now.")
 
-        image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
+        image_processor = self.model.module.lisa_neva.image_processor if hasattr(self.model, "module") else self.model.lisa_neva.image_processor
 
         self._train_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
                          tokenizer=self.tokenizer,
@@ -492,3 +542,42 @@ class MegatronLisaModel(MegatronNevaModel):
             persistent_workers=True if self.cfg.data.num_workers > 0 else False,
         )
 
+    def get_forward_output_and_loss_func(self, validation_step=False, tuning=False):
+        def loss_func(output_tensor):
+            return self.loss_func(output_tensor)
+        
+        def fwd_output_and_loss_func(dataloader_iter, model, checkpoint_activations_all_layers=None):
+            batch = next(dataloader_iter)
+            if isinstance(batch, tuple):
+                batch = batch[0]
+            
+            if parallel_state.get_pipeline_model_parallel_world_size() == 1:
+                for k in batch.keys():
+                    if self.get_attention_mask_from_fusion:
+                        batch[k] = batch[k].cuda(non_blocking=True) if k not in ['attention_mask'] else None
+                    else:
+                        batch[k] = batch[k].cuda(non_blocking=True)
+            else:
+                raise NotImplementedError
+
+            forward_args = {
+                'input_ids': batch['tokens'],
+                # 'position_ids': batch['position_ids'],
+                'attention_mask': batch['attention_mask'],
+                'labels': batch['labels'],
+                'media': batch.get('images_clip', None),
+                "images": batch["images"],
+                "masks_list": batch["masks_list"],
+                "label_list": batch["label_list"],
+                "resize_list": batch["resize_list"],
+                "offset": batch["offset"],
+            }
+
+            output_tensor = model(**forward_args)
+
+            return output_tensor, loss_func
+        
+        return fwd_output_and_loss_func
+    
+    def loss_func(self, output_tensor):
+        return 0.0

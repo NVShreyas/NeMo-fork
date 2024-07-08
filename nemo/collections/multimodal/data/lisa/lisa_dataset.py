@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import default_collate
 
 from nemo.collections.multimodal.data.neva import conversation as conversation_lib
 from nemo.collections.multimodal.data.common.image_transforms import ResizeLongestSide
@@ -26,9 +27,8 @@ from nemo.collections.multimodal.data.lisa.utils import (
 
 
 def collate_fn(
-    batch, tokenizer=None, conv_type="llava_v1", use_mm_start_end=True, seq_len=2048
+    instances, tokenizer=None, conv_type="llava_v1", use_mm_start_end=True, seq_len=2048
 ):
-    image_path_list = []
     images_list = []
     images_clip_list = []
     conversation_list = []
@@ -40,30 +40,18 @@ def collate_fn(
     offset_list = [0]
     cnt = 0
     inferences = []
-    for (
-        image_path,
-        images,
-        images_clip,
-        conversations,
-        masks,
-        label,
-        resize,
-        questions,
-        sampled_classes,
-        inference,
-    ) in batch:
-        image_path_list.append(image_path)
-        images_list.append(images)
-        images_clip_list.append(images_clip)
-        conversation_list.extend(conversations)
-        label_list.append(label)
-        masks_list.append(masks.float())
-        resize_list.append(resize)
-        questions_list.append(questions)
-        sampled_classes_list.append(sampled_classes)
-        cnt += len(conversations)
+    for instance in instances:
+        images_list.append(instance["image"])
+        images_clip_list.append(instance["image_clip"])
+        conversation_list.extend(instance["conversation"])
+        label_list.append(instance["label"])
+        masks_list.append(instance["mask"].float())
+        resize_list.append(instance["resize"])
+        questions_list.append(instance["question"])
+        sampled_classes_list.append(instance["sampled_sent"])
+        cnt += len(instance["conversation"])
         offset_list.append(cnt)
-        inferences.append(inference)
+        inferences.append(instance["inference"])
 
     if use_mm_start_end:
         # replace <image> token
@@ -129,22 +117,22 @@ def collate_fn(
             targets = targets[:, :truncate_len]
             attention_masks = attention_masks[:, :truncate_len]
 
-    return {
-        "media": torch.stack(images_list, dim=0),
+    data = {
+        "images": torch.stack(images_list, dim=0),
         "images_clip": torch.stack(images_clip_list, dim=0),
         "tokens": input_ids,
         "labels": targets,
-        "attention_masks": attention_masks,
-        "masks_list": masks_list,
-        "label_list": label_list,
-        "resize_list": resize_list,
+        "attention_mask": attention_masks,
+        "masks_list": torch.stack(masks_list, dim=0),
+        "label_list": torch.stack(label_list, dim=0),
+        "resize_list": torch.stack(resize_list, dim=0),
         "offset": torch.LongTensor(offset_list),
-        "questions_list": questions_list,
-        "sampled_classes_list": sampled_classes_list,
-        "inference": inferences[0],
-        "conversation_list": conversation_list,
+        # "questions_list": questions_list,
+        # "sampled_classes_list": sampled_classes_list,
+        # "conversation_list": conversation_list,
     }
 
+    return data
 
 class ReasonSegDataset(torch.utils.data.Dataset):
     pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
@@ -371,31 +359,29 @@ class ReasonSegDataset(torch.utils.data.Dataset):
 
         # preprocess for sam
         image = self.transform.apply_image(image)
-        resize = image.shape[:2]
+        resize = torch.Tensor(image.shape[:2])
         image = self.preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
 
         if self.split == "train":
-            return (
-                image_path,
-                image,
-                image_clip,
-                conversations,
-                masks,
-                label,
-                resize,
-                questions,
-                sampled_sents,
-                False, # if in train
+            return dict(
+                image=image,
+                image_clip=image_clip,
+                conversation=conversations,
+                mask=masks,
+                label=label,
+                resize=resize,
+                question=questions,
+                sampled_sent=sampled_sents,
+                inference=False,
             )
-        return (
-            image_path,
-            image,
-            image_clip,
-            conversations,
-            masks,
-            labels,
-            resize,
-            None,
-            None,
-            True, # if in inference
+        return dict(
+            image=image,
+            image_clip=image_clip,
+            conversation=conversations,
+            mask=masks,
+            label=labels,
+            resize=resize,
+            question=None,
+            sampled_sent=None,
+            inference=True,
         )
