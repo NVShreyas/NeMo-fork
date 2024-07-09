@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
+from nemo.collections.multimodal.modules.sam.common import LayerNorm2d
 from nemo.collections.nlp.modules.common.megatron.module import Float16Module, MegatronModule
 
 # MegatronModule
@@ -51,10 +51,7 @@ class MaskDecoder(nn.Module):
             nn.ConvTranspose2d(
                 transformer_dim, transformer_dim // 4, kernel_size=2, stride=2
             ),
-            get_layer_norm(transformer_dim // 4, 
-                           model_config.layernorm_epsilon, 
-                           model_config.persist_layer_norm, 
-                           sequence_parallel=model_config.sequence_parallel),
+            LayerNorm2d(transformer_dim // 4),
             activation(),
             nn.ConvTranspose2d(
                 transformer_dim // 4, transformer_dim // 8, kernel_size=2, stride=2

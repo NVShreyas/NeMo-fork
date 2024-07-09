@@ -477,7 +477,8 @@ class SAMVisionTransformer(MegatronModule):
                                     class_token=False,
                                     single_token_output=False,)
         if self.post_process:
-            # TODO: make sure this nn.LayerNorm == LayerNorm2D used in LISA.
+            # make sure this nn.LayerNorm == LayerNorm2D used in LISA.
+            # It is not the same. TODO: add LayerNorm2D to nemo
             self.norm1 = get_layer_norm(self.outout_dim,
                                     model_cfg.layernorm_epsilon,
                                     model_cfg.persist_layer_norm,

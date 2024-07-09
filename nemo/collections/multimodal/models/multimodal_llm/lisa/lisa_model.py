@@ -116,7 +116,7 @@ class SAM(nn.Module):
     def postprocess_masks(
         self,
         masks: torch.Tensor,
-        input_size: Tuple[int, ...],
+        input_size: torch.Tensor,
         original_size: Tuple[int, ...],
     ) -> torch.Tensor:
         """
@@ -134,6 +134,10 @@ class SAM(nn.Module):
           (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
             is given by original_size.
         """
+        if len(input_size.shape) > 1:
+            input_size = input_size.flatten()
+        assert input_size.shape == torch.Size([2])
+        input_size = input_size.int()
 
         masks = F.interpolate(
             masks.float(),
@@ -142,7 +146,7 @@ class SAM(nn.Module):
             align_corners=False,
         )
 
-        masks = masks[..., : input_size[0], : input_size[1]]
+        masks = masks[..., : input_size[0].item(), : input_size[1].item()]
         masks = F.interpolate(
             masks, original_size, mode="bilinear", align_corners=False
         )
@@ -166,7 +170,7 @@ class LisaBaseModel(nn.Module):
 
         # Projection layer
         in_dim = model_config.hidden_size
-        out_dim = model_config.mm_cfg.sam_extra_args.encoder.prompt_embed_dim #TODO: what is this?
+        out_dim = model_config.mm_cfg.sam_extra_args.encoder.prompt_embed_dim
         text_fc = [
             nn.Linear(in_dim, in_dim),
             nn.ReLU(inplace=True),
@@ -202,25 +206,13 @@ class MCoreLisaModel(MCoreNevaModel):
                  seg_token_id,
                  mcore_gpt,
                  **kwargs):
-        # MCoreGPTModel.__init__(self, **kwargs)
         MCoreNevaModel.__init__(self, model_config.mm_cfg,
                                         media_start_id,
                                         media_end_id,
                                         mcore_gpt,
                                         **kwargs)
-        #super().__init__()
-        # super(MCoreLisaModel, self).__init__(model_config.mm_cfg,
-        #                                     media_start_id,
-        #                                     media_end_id,
-        #                                     mcore_gpt,
-        #                                     **kwargs)
-        #LisaBaseModel.__init__(self, model_config, **kwargs)
+
         self.lisa_sam = LisaBaseModel(model_config, **kwargs)
-        # self.lisa_neva = MCoreNevaModel(model_config.mm_cfg,
-        #                                 media_start_id,
-        #                                 media_end_id,
-        #                                 mcore_gpt,
-        #                                 **kwargs)
         self.seg_token_id = seg_token_id
         
         if model_config.precision in ['bf16', 'bf16-mixed']:
@@ -293,7 +285,6 @@ class MCoreLisaModel(MCoreNevaModel):
         label_list = kwargs.pop("seg_labels", None)
         masks_list = kwargs.pop("masks", None)
 
-        # This is hidden states from McoreGPT in shape - torch.Size([384, 1, 768])
         neva_output = super().forward(*args, **kwargs)
         # NV LISA Example
         ## seg_mask shape: [1, 384]
@@ -302,13 +293,15 @@ class MCoreLisaModel(MCoreNevaModel):
         ## llava output: [6, 447, 5120]
         ## seg_mask: [6, 447]
         neva_output = torch.transpose(neva_output, 0, 1)
-        #import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
         hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
         
         # TODO: verify this. shape mismatch here
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
+        
+        # embedding corresponding to seg token -> [bs, 256]
         pred_embeddings = last_hidden_state[seg_token_mask]
 
         seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
@@ -329,7 +322,6 @@ class MCoreLisaModel(MCoreNevaModel):
         multimask_output = False
         pred_masks = []
         
-        #import pdb; pdb.set_trace()
         # TODO: why loop if it happens for every sample in batch?
         for i in range(len(pred_embeddings)):
             (
@@ -360,11 +352,9 @@ class MCoreLisaModel(MCoreNevaModel):
                 original_size=label_list[i].shape,
             )
             pred_masks.append(pred_mask[:, 0])
-        #import pdb; pdb.set_trace()
+
         # pred_masks 0: torch.Size([3, 1365, 2048])
         return pred_masks
-        # return pred_masks if inference
-        # else calculate loss
 
     def forward(self, *args, **kwargs):
         # Inputs:
