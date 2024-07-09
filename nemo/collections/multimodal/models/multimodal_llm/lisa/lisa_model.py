@@ -251,6 +251,10 @@ class MCoreLisaModel(MCoreNevaModel):
         images = kwargs.pop('images', None)
         input_ids = kwargs.get('input_ids', None)
         image_embeddings = self.lisa_sam.sam.get_visual_embs(images)
+        if image_embeddings.dim() == 3:
+            # WHY?
+            image_embeddings = image_embeddings.unsqueeze(0)
+        # LISA Dim: torch.Size([2, 256, 64, 64])
 
         seg_token_mask = input_ids[:, 1:] == self.seg_token_id
         seg_token_mask = torch.cat(
@@ -261,10 +265,13 @@ class MCoreLisaModel(MCoreNevaModel):
             dim=1,
         )
         # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
-        seg_token_mask = torch.cat(
-            [torch.zeros((seg_token_mask.shape[0], 255)).bool().to(images.device), seg_token_mask],
-            dim=1,
-        )
+
+        # ANMOL: Input IDs already have image tokens (set as 0) inserted
+        # This could be an issue if we run inference using pretrained model.
+        # seg_token_mask = torch.cat(
+        #     [torch.zeros((seg_token_mask.shape[0], 255)).bool().to(images.device), seg_token_mask],
+        #     dim=1,
+        # )
 
         # images_clip = kwargs.get("media", None)
         # images_clip_list = []
@@ -288,7 +295,14 @@ class MCoreLisaModel(MCoreNevaModel):
 
         # This is hidden states from McoreGPT in shape - torch.Size([384, 1, 768])
         neva_output = super().forward(*args, **kwargs)
-
+        # NV LISA Example
+        ## seg_mask shape: [1, 384]
+        ## neva_output shape: [384, 1, 4096]
+        # LISA example
+        ## llava output: [6, 447, 5120]
+        ## seg_mask: [6, 447]
+        neva_output = torch.transpose(neva_output, 0, 1)
+        #import pdb; pdb.set_trace()
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
         hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
@@ -302,18 +316,20 @@ class MCoreLisaModel(MCoreNevaModel):
         seg_token_offset = torch.cat(
             [torch.zeros(1).long().to(images.device), seg_token_offset], dim=0
         )
-
-        seg_token_offset = seg_token_offset[offset]
+        #import pdb; pdb.set_trace()
+        ## ANMOL: I think this logic needs to be fixed as offset is single entry element
+        #seg_token_offset = seg_token_offset[offset]
 
         pred_embeddings_ = []
         for i in range(len(seg_token_offset) - 1):
             start_i, end_i = seg_token_offset[i], seg_token_offset[i + 1]
             pred_embeddings_.append(pred_embeddings[start_i:end_i])
         pred_embeddings = pred_embeddings_
-
+        # pred_embeddings a list with element shape: torch.Size([3, 256])
         multimask_output = False
         pred_masks = []
         
+        #import pdb; pdb.set_trace()
         # TODO: why loop if it happens for every sample in batch?
         for i in range(len(pred_embeddings)):
             (
@@ -333,13 +349,20 @@ class MCoreLisaModel(MCoreNevaModel):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
+            # Neva-Lisa:
+            # (Pdb) image_embeddings.shape: torch.Size([1, 256, 64, 64])
+            # (Pdb) sparse_embeddings.shape: torch.Size([1, 1, 256])
+            # (Pdb) dense_embeddings.shape: torch.Size([1, 256, 64, 64])
+            # self.lisa_sam.sam.prompt_encoder.get_dense_pe(): torch.Size([1, 256, 64, 64])
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resize_list[i],
                 original_size=label_list[i].shape,
             )
             pred_masks.append(pred_mask[:, 0])
-        
+        #import pdb; pdb.set_trace()
+        # pred_masks 0: torch.Size([3, 1365, 2048])
+        return pred_masks
         # return pred_masks if inference
         # else calculate loss
 
@@ -585,4 +608,4 @@ class MegatronLisaModel(MegatronNevaModel):
         return fwd_output_and_loss_func
     
     def loss_func(self, output_tensor):
-        return 0.0
+        return output_tensor, 0.0
