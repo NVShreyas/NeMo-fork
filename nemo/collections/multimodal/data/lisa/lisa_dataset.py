@@ -282,7 +282,11 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         
         total_num_patches = height_num_patches * width_num_patches
 
-        assert len(conversations) == 1
+        if len(conversations) != 1:
+            # example: [' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nIf you needed to change the volume or select a different radio station, what part of the radio would you adjust? Please respond with segmentation mask. [/INST] [SEG]. <extra_id_7>', ' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nTo modify the volume or switch to a different radio station, which section of the radio would you manipulate? Please respond with segmentation mask. [/INST] It is [SEG]. <extra_id_7>', ' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nIf we are looking at a close-up of a radio, which part of the radio should we adjust when selecting a different radio station or changing the volume? Please respond with segmentation mask. [/INST] Sure, it is [SEG]. <extra_id_7>']
+            # masks.shape: torch.Size([3, 459, 800])
+            # seg_labels.shape: torch.Size([459, 800])
+            import pdb; pdb.set_trace()
 
         replace_token = (
             DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_PATCH_TOKEN * total_num_patches + DEFAULT_IM_END_TOKEN
