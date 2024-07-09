@@ -105,7 +105,7 @@ model:
         iou_head_hidden_dim: 256
     pretrain_mm_mlp_adapter: null # path to pretrained mm adapter
     mm_mlp_adapter_type: linear
-    use_im_start_end: False
+    use_im_start_end: True
 
 
   # LLM configs
@@ -215,7 +215,7 @@ model:
     is_multimodal: True
     media_type: image # currently supported: image
     sep_image_conv_front: False
-    conv_template: "llava_v1" # check `nemo/collections/multimodal/data/neva/conversation.py`
+    conv_template: "llava_llama_2" # check `nemo/collections/multimodal/data/neva/conversation.py`
     image_folder: null
     image_aspect_ratio: 'square'
 

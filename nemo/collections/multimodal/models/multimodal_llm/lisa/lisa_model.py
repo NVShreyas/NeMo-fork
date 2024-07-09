@@ -18,7 +18,7 @@ from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MC
 from nemo.collections.multimodal.data.neva.conversation import DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import get_specs
 from nemo.utils import logging
-from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset, collate_fn
+from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset, DataCollatorForSegmentationDataset
 from nemo.collections.multimodal.parts.utils import load_nemo_model_weights
 
 try:
@@ -266,38 +266,34 @@ class MCoreLisaModel(MCoreNevaModel):
             dim=1,
         )
 
-        images_clip = kwargs.get("media", None)
-        images_clip_list = []
+        # images_clip = kwargs.get("media", None)
+        # images_clip_list = []
         offset = kwargs.pop("offset", None)
-        for i in range(len(offset) - 1):
-            start_i, end_i = offset[i], offset[i + 1]
-            images_clip_i = (
-                images_clip[i]
-                .expand(end_i - start_i, -1, -1, -1, -1)
-                .contiguous()
-            )
-            images_clip_list.append(images_clip_i)
-        images_clip = torch.stack(images_clip_list, dim=0)
-        print(images_clip.shape)
 
-        resize_list = kwargs.pop("resize_list", None)
-        label_list = kwargs.pop("label_list", None)
-        masks_list = kwargs.pop("masks_list", None)
+        # TODO: doesn't matter for batch_size = 1.
+        # for i in range(len(offset) - 1):
+        #     start_i, end_i = offset[i], offset[i + 1]
+        #     images_clip_i = (
+        #         images_clip[i]
+        #         .expand(end_i - start_i, -1, -1, -1, -1)
+        #         .contiguous()
+        #     )
+        #     images_clip_list.append(images_clip_i)
+        # images_clip = torch.stack(images_clip_list, dim=0)
+        # kwargs["media"] = images_clip
 
-        kwargs["media"] = images_clip
-        print(args, kwargs.keys())
+        resize_list = kwargs.pop("resize", None)
+        label_list = kwargs.pop("seg_labels", None)
+        masks_list = kwargs.pop("masks", None)
 
-        # This is hidden states from McoreGPT
+        # This is hidden states from McoreGPT in shape - torch.Size([384, 1, 768])
         neva_output = super().forward(*args, **kwargs)
-        
 
         hidden_states = []
-        # TODO: verify [-1]
-        # Llava in HF returns hiddens states per layer (https://huggingface.co/docs/transformers/main/en/model_doc/llama#transformers.LlamaModel:~:text=up%20sequential%20decoding.-,hidden_states,-(tuple(torch))
-        # I think [-1] returns hidden state of last layer in HF models
-        # We don't have to do this. We just have to make sure we are getting the hidden states from the last PP stage in MCore.
-        hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output[-1]))
+        # make sure we are getting the hidden states from the last PP stage in MCore.
+        hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
         
+        # TODO: verify this. shape mismatch here
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         pred_embeddings = last_hidden_state[seg_token_mask]
 
@@ -416,8 +412,6 @@ class MegatronLisaModel(MegatronNevaModel):
         logging.info(
             f"Lisa model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
         )
-        
-        print([n for n, p in model.named_parameters()])
 
         return model
     
@@ -476,15 +470,25 @@ class MegatronLisaModel(MegatronNevaModel):
         image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
 
         self._train_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
-                         tokenizer=self.tokenizer,
-                         image_processor=image_processor,
-                         samples_per_epoch=self.cfg.micro_batch_size,
-                         image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
-                         reason_seg_data="reasonseg|train")
+                            tokenizer=self.tokenizer,
+                            image_processor=image_processor,
+                            template_type=self.cfg.data.conv_template,
+                            patch_dim=self.cfg.mm_cfg.vision_encoder.patch_dim,
+                            mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type,
+                            add_extra_token=1,
+                            context_length=self.cfg.encoder_seq_length,
+                            samples_per_epoch=self.cfg.micro_batch_size,
+                            image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
+                            reason_seg_data="reasonseg|train")
         
         self._validation_ds = ReasonSegDataset(base_image_dir=self.cfg.data.image_folder,
                             tokenizer=self.tokenizer,
                             image_processor=image_processor,
+                            template_type=self.cfg.data.conv_template,
+                            patch_dim=self.cfg.mm_cfg.vision_encoder.patch_dim,
+                            mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type,
+                            add_extra_token=1,
+                            context_length=self.cfg.encoder_seq_length,
                             samples_per_epoch=self.cfg.micro_batch_size,
                             image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
                             reason_seg_data="reasonseg|val",
@@ -532,13 +536,7 @@ class MegatronLisaModel(MegatronNevaModel):
         else:
             raise ValueError('cfg.data.dataloader_type not found. Must be "single" or "cyclic"')
 
-        collate_func = partial(
-            collate_fn,
-            tokenizer=self.tokenizer,
-            conv_type=self.cfg.data.conv_template,
-            use_mm_start_end=True,
-            seq_len=self.cfg.encoder_seq_length,
-        )
+        collate_func = DataCollatorForSegmentationDataset(self.cfg, self.tokenizer)
         return torch.utils.data.DataLoader(
             dataset,
             batch_sampler=batch_sampler,
@@ -559,10 +557,11 @@ class MegatronLisaModel(MegatronNevaModel):
             
             if parallel_state.get_pipeline_model_parallel_world_size() == 1:
                 for k in batch.keys():
-                    if self.get_attention_mask_from_fusion:
-                        batch[k] = batch[k].cuda(non_blocking=True) if k not in ['attention_mask'] else None
-                    else:
-                        batch[k] = batch[k].cuda(non_blocking=True)
+                    if k not in ['offsets']:
+                        if self.get_attention_mask_from_fusion:
+                            batch[k] = batch[k].cuda(non_blocking=True) if k not in ['attention_mask'] else None
+                        else:
+                            batch[k] = batch[k].cuda(non_blocking=True)
             else:
                 raise NotImplementedError
 
@@ -571,12 +570,12 @@ class MegatronLisaModel(MegatronNevaModel):
                 'position_ids': batch['position_ids'],
                 'attention_mask': batch['attention_mask'],
                 'labels': batch['labels'],
-                'media': batch.get('images_clip', None),
+                'media': batch.get('media', None),
                 "images": batch["images"],
-                "masks_list": batch["masks_list"],
-                "label_list": batch["label_list"],
-                "resize_list": batch["resize_list"],
-                "offset": batch["offset"],
+                "masks": batch["masks"],
+                "seg_labels": batch["seg_labels"],
+                "resize": batch["resizes"],
+                "offset": batch["offsets"],
             }
 
             output_tensor = model(**forward_args)

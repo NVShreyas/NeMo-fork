@@ -9,7 +9,7 @@ import torch
 
 
 IGNORE_INDEX = -1
-IMAGE_TOKEN_INDEX = -200
+IMAGE_TOKEN_INDEX = 32003
 DEFAULT_IMAGE_TOKEN = "<image>"
 # Updated to follow neva
 # DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"

@@ -1,22 +1,25 @@
+from dataclasses import dataclass
 import glob
 import json
 import os
 import random
 
 import cv2
+from einops import rearrange
 import numpy as np
+from omegaconf import DictConfig
 import torch
 import torch.nn.functional as F
-from einops import rearrange
+from torch.utils.data import default_collate
+import transformers
 
 from nemo.collections.multimodal.data.neva import conversation as conversation_lib
-from nemo.collections.multimodal.data.neva.neva_dataset import LazySupervisedDataset
+from nemo.collections.multimodal.data.neva.neva_dataset import tokenize
 from nemo.collections.multimodal.data.common.image_transforms import ResizeLongestSide
 from nemo.collections.nlp.modules.common.megatron.utils import get_ltor_masks_and_position_ids
 
 from nemo.collections.multimodal.data.lisa.utils import (
     get_mask_from_json, 
-    tokenizer_image_token,
     ANSWER_LIST, 
     DEFAULT_IMAGE_TOKEN,
     EXPLANATORY_QUESTION_LIST, 
@@ -25,146 +28,27 @@ from nemo.collections.multimodal.data.lisa.utils import (
     DEFAULT_IM_END_TOKEN,
     DEFAULT_IM_START_TOKEN,
     IGNORE_INDEX,
+    DEFAULT_IMAGE_PATCH_TOKEN
 )    
 
 
-def collate_fn(
-    instances, tokenizer=None, conv_type="llava_v1", use_mm_start_end=True, seq_len=2048
-):
-    images_list = []
-    images_clip_list = []
-    conversation_list = []
-    masks_list = []
-    label_list = []
-    resize_list = []
-    questions_list = []
-    sampled_classes_list = []
-    offset_list = [0]
-    cnt = 0
-    inferences = []
-    for instance in instances:
-        images_list.append(instance["image"])
-        images_clip_list.append(instance["image_clip"])
-        conversation_list.extend(instance["conversation"])
-        label_list.append(instance["label"])
-        masks_list.append(instance["mask"].float())
-        resize_list.append(instance["resize"])
-        questions_list.append(instance["question"])
-        sampled_classes_list.append(instance["sampled_sent"])
-        cnt += len(instance["conversation"])
-        offset_list.append(cnt)
-        inferences.append(instance["inference"])
-
-    if use_mm_start_end:
-        # replace <image> token
-        for i in range(len(conversation_list)):
-            replace_token = DEFAULT_IMAGE_TOKEN
-            replace_token = (
-                DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
-            )
-            conversation_list[i] = conversation_list[i].replace(
-                DEFAULT_IMAGE_TOKEN, replace_token
-            )
-    input_ids = [
-        tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
-        for prompt in conversation_list
-    ]
-    input_ids = torch.nn.utils.rnn.pad_sequence(
-        input_ids, batch_first=True, padding_value=tokenizer.pad_id
-    )
-    attention_masks = input_ids.ne(tokenizer.pad_id)
-
-    conv = conversation_lib.conv_templates[conv_type].copy()
-    targets = input_ids.clone()
-
-    if conv_type == "llava_v1":
-        sep = conv.sep + conv.roles[1] + ": "
-    else:
-        sep = "[/INST] "
-
-    for conversation, target in zip(conversation_list, targets):
-        total_len = int(target.ne(tokenizer.pad_id).sum())
-
-        rounds = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
-
-            parts = rou.split(sep)
-            assert len(parts) == 2, (len(parts), rou)
-            parts[0] += sep
-
-            if DEFAULT_IMAGE_TOKEN in conversation:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
-            else:
-                round_len = len(tokenizer.text_to_ids(rou))
-                instruction_len = len(tokenizer.text_to_ids(parts[0])) - 2
-
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-            cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
-
-        if cur_len < seq_len:
-            assert cur_len == total_len
-
-    if inferences[0] == False:
-        truncate_len = seq_len - 255
-
-        if input_ids.shape[1] > truncate_len:
-            input_ids = input_ids[:, :truncate_len]
-            targets = targets[:, :truncate_len]
-            attention_masks = attention_masks[:, :truncate_len]
-
-    print(input_ids, targets)
-    import pdb; pdb.set_trace()
-
-    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-                data=input_ids,
-                eod_token=tokenizer.eos_id,
-                eod_mask_loss=False,
-                reset_attention_mask=False,
-                reset_position_ids=False,
-            )
-
-    images = torch.stack(images_list, dim=0)
-    images_clip = torch.stack(images_clip_list, dim=0)
-    
-    images_clip = rearrange(images_clip, "b c h w -> b 1 1 c h w")
-
-    data = {
-        "images": images,
-        "images_clip": images_clip,
-        "tokens": input_ids,
-        "labels": targets,
-        "attention_mask": attention_mask,
-        "masks_list": torch.stack(masks_list, dim=0),
-        "label_list": torch.stack(label_list, dim=0),
-        "resize_list": torch.stack(resize_list, dim=0),
-        "offset": torch.LongTensor(offset_list),
-        "position_ids": position_ids,
-        # "questions_list": questions_list,
-        # "sampled_classes_list": sampled_classes_list,
-        # "conversation_list": conversation_list,
-    }
-
-    return data
 
 class ReasonSegDataset(torch.utils.data.Dataset):
     pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
     pixel_std = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
-    ignore_label = 255
+    ignore_label = 255 # for segmentation mask
 
     def __init__(
         self,
         base_image_dir,
         tokenizer,
         image_processor,
+        template_type="llava_llama_2",
+        patch_dim=14,
+        mm_mlp_adapter_type="mlp_downsample",
+        context_length=4096,
+        add_extra_token=0,
         samples_per_epoch=500 * 8 * 2 * 10,
-        precision: str = "fp32",
         image_size: int = 224,
         num_classes_per_sample: int = 3,
         reason_seg_data="ReasonSeg|train",
@@ -178,7 +62,13 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         self.base_image_dir = base_image_dir
         self.image_size = image_size
         self.tokenizer = tokenizer
-        self.precision = precision
+        self.patch_dim = patch_dim
+        self.mm_mlp_adapter_type = mm_mlp_adapter_type
+        self.context_length = context_length
+        self.add_extra_token = add_extra_token
+        self.template_type = template_type
+        assert self.template_type == "llava_llama_2"
+
         self.transform = ResizeLongestSide(image_size)
         self.clip_image_processor = image_processor
 
@@ -291,8 +181,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                 answers.append(random.choice(self.answer_list))
 
             conversations = []
-            conv = conversation_lib.default_conversation.copy()
-            # roles = {"human": conv.roles[0], "gpt": conv.roles[1]} # why?
+            conv = conversation_lib.conv_templates[self.template_type].copy()
 
             i = 0
             while i < len(questions):
@@ -321,7 +210,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         sampled_sents = [sampled_sents[0]]
 
         conversations = []
-        conv = conversation_lib.default_conversation.copy()
+        conv = conversation_lib.conv_templates[self.template_type].copy()
         i = 0
         while i < len(sampled_sents):
             conv.messages = []
@@ -362,13 +251,13 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         if self.split == "train":
             (conversations, 
              masks, 
-             label, 
+             seg_labels, 
              questions, 
              sampled_sents) = self.get_train_data(image, image_path, json_path)
         else:
             (conversations, 
              masks, 
-             labels) = self.get_val_data(image, json_path)
+             seg_labels) = self.get_val_data(image, json_path)
         
         # preprocess image for clip
         image_clip = self.clip_image_processor.preprocess(image, return_tensors="pt")[
@@ -379,27 +268,150 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         image = self.transform.apply_image(image)
         resize = torch.Tensor(image.shape[:2])
         image = self.preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
+        # image = image.unsqueeze(0)
+        image_clip = image_clip.unsqueeze(0)
+
+        height_num_patches = image_clip.shape[2] // self.patch_dim
+        width_num_patches = image_clip.shape[3] // self.patch_dim
+
+        if self.mm_mlp_adapter_type == 'mlp_downsample':
+            if height_num_patches % 2 != 0:
+                height_num_patches += 1
+            if width_num_patches % 2 != 0:
+                width_num_patches += 1
+        
+        total_num_patches = height_num_patches * width_num_patches
+
+        assert len(conversations) == 1
+
+        replace_token = (
+            DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_PATCH_TOKEN * total_num_patches + DEFAULT_IM_END_TOKEN
+        )
+        conversation = conversations[0].replace(
+            DEFAULT_IMAGE_TOKEN, replace_token
+        )
+        conversations = [conversation]
+        tokens = tokenize(texts=conversations, tokenizer=self.tokenizer, context_length=self.context_length, add_extra_token=self.add_extra_token,
+        )
+
+        # llama tricks
+        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
+        tokens[tokens == 32006] = 1  # <s>
+        tokens[tokens == 32007] = 2  # </s>
+        labels = tokens.clone().detach()
+
+        conv = conversation_lib.conv_templates[self.template_type].copy()
+
+        # Mask labels
+        sep = "[/INST] "
+        for conversation, target in zip(conversations, labels):
+            rounds = conversation.split(conv.sep2)
+            cur_len = 0
+            for i, rou in enumerate(rounds):
+
+                if rou == "":
+                    break
+
+                parts = rou.split(sep)
+                if len(parts) != 2:
+                    break
+                parts[0] += sep
+
+                round_len = len(self.tokenizer.text_to_ids(rou + conv.sep2))
+                instruction_len = len(self.tokenizer.text_to_ids(parts[0])) - 2
+                if i > 0:
+                    round_len -= 1  # Remove extra token added by sp tokenizer
+                else:
+                    instruction_len += 1
+                target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+
+                cur_len += round_len
+            target[cur_len:] = IGNORE_INDEX
+        
+        if self.add_extra_token:
+            tokens = tokens[:, :-1].contiguous()
+            labels = labels[:, 1:].contiguous()
+        else:
+            labels = torch.roll(labels, shifts=-1, dims=-1)
+            labels[:, -1] = IGNORE_INDEX
+        
+        tokens = tokens[0]
+        labels = labels[0]
 
         if self.split == "train":
             return dict(
+                tokens=tokens,
+                labels=labels,
                 image=image,
                 image_clip=image_clip,
-                conversation=conversations,
                 mask=masks,
-                label=label,
+                seg_labels=seg_labels,
                 resize=resize,
-                question=questions,
-                sampled_sent=sampled_sents,
-                inference=False,
+                conversation_len=len(conversations)
             )
         return dict(
+            tokens=tokens,
+            labels=labels,
             image=image,
             image_clip=image_clip,
-            conversation=conversations,
             mask=masks,
-            label=labels,
+            seg_labels=seg_labels,
             resize=resize,
-            question=None,
-            sampled_sent=None,
-            inference=True,
+            conversation_len=len(conversations)
         )
+
+
+@dataclass
+class DataCollatorForSegmentationDataset(object):
+
+    model_cfg: DictConfig
+    tokenizer: transformers.PreTrainedTokenizer
+
+    def __call__(self, instances):
+        max_len = max(instance['tokens'].shape[0] for instance in instances)
+        max_len = (max_len - 1) // 64 * 64 + 64
+        offset_list = []
+        count = 0
+        for instance in instances:
+            pad_len = max_len - instance['tokens'].shape[0]
+            instance['tokens'] = F.pad(instance['tokens'], (0, pad_len), 'constant', 0)
+            instance['labels'] = F.pad(instance['labels'], (0, pad_len), 'constant', -1)
+            count += instance["conversation_len"]
+            offset_list.append(count)
+
+        batch = default_collate(instances)
+        tokenizer = self.tokenizer
+        model_cfg = self.model_cfg
+        
+        tokens = batch['tokens']
+        labels = batch['labels']
+        media = batch.get('image_clip')
+
+        attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                data=tokens,
+                eod_token=tokenizer.eos_id,
+                eod_mask_loss=model_cfg.data.get("eod_mask_loss", False),
+                reset_attention_mask=False,
+                reset_position_ids=False,
+            )
+        
+        loss_mask[labels == -1] = 0.0
+        tokens[tokens == -1] = 0
+        labels[labels == -1] = 0
+
+        media = rearrange(media, "b T c h w -> b T 1 c h w")
+
+        batch = {
+            'tokens': tokens,
+            'labels': labels,
+            'attention_mask': attention_mask,
+            'loss_mask': loss_mask,
+            'position_ids': position_ids,
+            'media': media,
+            "images": batch["image"],
+            "masks": batch["mask"],
+            "seg_labels": batch["seg_labels"],
+            "resizes": batch["resize"],
+            "offsets": offset_list,
+        }
+        return batch
