@@ -50,7 +50,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         add_extra_token=0,
         samples_per_epoch=500 * 8 * 2 * 10,
         image_size: int = 224,
-        num_classes_per_sample: int = 3,
+        num_classes_per_sample: int = 1,
         reason_seg_data="ReasonSeg|train",
         explanatory=0.1,
     ):
@@ -196,7 +196,8 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             and image_name in self.img_to_explanation
             and choice == 2
         ):
-            masks = torch.rand(0, *ori_size)
+            # This type of conversation doesn't require GPT to output [SEG], hence mask is not needed.
+            masks = torch.ones(1, *ori_size) * -1
             label = torch.ones(ori_size) * self.ignore_label
         else:
             masks = np.stack(sampled_masks, axis=0)
@@ -352,7 +353,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                 image=image,
                 image_clip=image_clip,
                 mask=masks,
-                seg_labels=seg_labels,
+                # seg_labels=seg_labels,
                 resize=resize,
                 conversation_len=len(conversations)
             )
@@ -362,7 +363,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             image=image,
             image_clip=image_clip,
             mask=masks,
-            seg_labels=seg_labels,
+            # seg_labels=seg_labels,
             resize=resize,
             conversation_len=len(conversations)
         )
@@ -375,14 +376,21 @@ class DataCollatorForSegmentationDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances):
-        max_len = max(instance['tokens'].shape[0] for instance in instances)
+        max_len = max(instance['tokens'].shape[1] for instance in instances)
         max_len = (max_len - 1) // 64 * 64 + 64
+        mask_shapes = torch.stack([torch.Tensor([instance['mask'].shape[1], instance['mask'].shape[2]]).to(torch.int)
+                                    for instance in instances], dim=0)
+        max_height = mask_shapes[:, 0].max().item()
+        max_width = mask_shapes[:, 1].max().item()
         offset_list = [0]
         count = 0
         for instance in instances:
-            pad_len = max_len - instance['tokens'].shape[0]
+            pad_len = max_len - instance['tokens'].shape[1]
+            pad_h = max_height - instance['mask'].shape[1]
+            pad_w = max_width - instance['mask'].shape[2]
             instance['tokens'] = F.pad(instance['tokens'], (0, pad_len), 'constant', 0)
             instance['labels'] = F.pad(instance['labels'], (0, pad_len), 'constant', -1)
+            instance['mask'] = F.pad(instance["mask"], (0, pad_w, 0, pad_h), 'constant', -1)
             count += instance["conversation_len"]
             offset_list.append(count)
 
@@ -421,7 +429,7 @@ class DataCollatorForSegmentationDataset(object):
             'media': media,
             "images": batch["image"],
             "masks": batch["mask"],
-            # "seg_labels": batch["seg_labels"],
+            "mask_shapes": mask_shapes,
             "resizes": batch["resize"],
             "offsets": torch.LongTensor(offset_list),
         }

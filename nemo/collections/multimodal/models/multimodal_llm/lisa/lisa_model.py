@@ -123,7 +123,7 @@ class SAM(nn.Module):
         self,
         masks: torch.Tensor,
         input_size: torch.Tensor,
-        original_size: Tuple[int, ...],
+        original_size: torch.Tensor,
     ) -> torch.Tensor:
         """
         Remove padding and upscale masks to the original image size.
@@ -154,7 +154,7 @@ class SAM(nn.Module):
 
         masks = masks[..., : input_size[0].item(), : input_size[1].item()]
         masks = F.interpolate(
-            masks, original_size, mode="bilinear", align_corners=False
+            masks, [original_size[0].item(), original_size[1].item()], mode="bilinear", align_corners=False
         )
         return masks
 
@@ -290,7 +290,7 @@ class MCoreLisaModel(MCoreNevaModel):
         kwargs["media"] = images_clip
 
         resizes = kwargs.pop("resize", None)
-        # seg_labels = kwargs.pop("seg_labels", None)
+        mask_shapes = kwargs.pop("mask_shapes", None)
         gt_masks_labels = kwargs.pop("masks", None)
 
         neva_output = super().forward(*args, **kwargs)
@@ -354,13 +354,13 @@ class MCoreLisaModel(MCoreNevaModel):
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resizes[i],
-                original_size=gt_masks_labels[i].shape[1:],
+                original_size=mask_shapes[i],
             )
             pred_masks.append(pred_mask[:, 0])
 
         if gt_masks_labels != None and "labels" in kwargs:
-            # last PP stage or inference
-            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels)
+            # last PP stage or not inference
+            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels, mask_shapes)
 
         pred_masks = torch.stack(pred_masks, dim=0)
         return gpt_logits.transpose(0, 1).contiguous()#, pred_masks
@@ -369,7 +369,8 @@ class MCoreLisaModel(MCoreNevaModel):
                        pred_masks: List[torch.Tensor], 
                        gpt_logits: torch.Tensor,
                        gpt_labels: torch.Tensor,
-                       seg_labels: torch.Tensor,
+                       gt_masks: torch.Tensor,
+                       mask_shapes: torch.Tensor,
                        lm_loss_weight=1.0,
                        dice_loss_weight=0.5,
                        bce_loss_weight=2.0):
@@ -379,24 +380,30 @@ class MCoreLisaModel(MCoreNevaModel):
         mask_dice_loss = 0
         num_masks = 0
 
-        # TODO: vectorize
         for i in range(len(pred_masks)):
-            seg_label = seg_labels[i]
+            gt_mask = gt_masks[i]
             pred_mask = pred_masks[i]
 
+            # NOTE: due to this, it is not possible to vectorize
+            # this is required as some GPT responses don't contain [SEG] and loss is skipped.
+            if (gt_mask == -1).all():
+                continue
+            gt_mask = gt_mask[gt_mask != -1]
+            gt_mask = gt_mask.reshape([1, mask_shapes[i][0].item(), mask_shapes[i][1].item()])
+
             assert (
-                seg_label.shape[0] == pred_mask.shape[0]
-            ), f"seg_label.shape: {seg_label.shape}, pred_mask.shape: {pred_mask.shape}"
+                gt_mask.shape[0] == pred_mask.shape[0]
+            ), f"gt_mask.shape: {gt_mask.shape}, pred_mask.shape: {pred_mask.shape}"
 
             mask_bce_loss += (
-                sigmoid_ce_loss(pred_mask, seg_label, num_masks=seg_label.shape[0])
-                * seg_label.shape[0]
+                sigmoid_ce_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+                * gt_mask.shape[0]
             )
             mask_dice_loss += (
-                dice_loss(pred_mask, seg_label, num_masks=seg_label.shape[0])
-                * seg_label.shape[0]
+                dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+                * gt_mask.shape[0]
             )
-            num_masks += seg_label.shape[0]
+            num_masks += gt_mask.shape[0]
 
         mask_bce_loss = bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
         mask_dice_loss = dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
@@ -479,7 +486,7 @@ class MegatronLisaModel(MegatronNevaModel):
                 attention_mask,
                 offsets, 
                 masks, 
-                seg_labels, 
+                mask_shapes,
                 resizes):
         
         forward_args = {
@@ -490,7 +497,7 @@ class MegatronLisaModel(MegatronNevaModel):
                 'media': media,
                 "images": images,
                 "masks": masks,
-                # "seg_labels": seg_labels,
+                "mask_shapes": mask_shapes,
                 "resize": resizes,
                 "offset": offsets,
             }
@@ -510,7 +517,18 @@ class MegatronLisaModel(MegatronNevaModel):
         super().setup(stage)
     
     def build_train_valid_test_datasets(self):
+        if self.trainer.limit_val_batches > 1.0 and isinstance(self.trainer.limit_val_batches, float):
+            raise ValueError("limit_val_batches must be an integer or float less than or equal to 1.0.")
+        
         logging.info("Building LISA datasets - only reason seg dataset supported for now.")
+        global_batch_size = self.cfg.global_batch_size
+        max_train_steps = self.trainer.max_steps
+        eval_iters = (max_train_steps // self.trainer.val_check_interval + 1) * self.trainer.limit_val_batches
+
+        train_valid_test_num_samples = [
+            max_train_steps * global_batch_size,
+            eval_iters * global_batch_size,
+        ]
 
         image_processor = self.model.module.image_processor if hasattr(self.model, "module") else self.model.image_processor
 
@@ -522,7 +540,7 @@ class MegatronLisaModel(MegatronNevaModel):
                             mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type,
                             add_extra_token=1,
                             context_length=self.cfg.encoder_seq_length,
-                            samples_per_epoch=self.cfg.micro_batch_size,
+                            samples_per_epoch=train_valid_test_num_samples[0],
                             image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
                             reason_seg_data="reasonseg|train")
         
@@ -534,7 +552,7 @@ class MegatronLisaModel(MegatronNevaModel):
                             mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type,
                             add_extra_token=1,
                             context_length=self.cfg.encoder_seq_length,
-                            samples_per_epoch=self.cfg.micro_batch_size,
+                            samples_per_epoch=train_valid_test_num_samples[1],
                             image_size=self.cfg.mm_cfg.sam_extra_args.encoder.image_size,
                             reason_seg_data="reasonseg|val",
                             explanatory=-1)
@@ -623,7 +641,7 @@ class MegatronLisaModel(MegatronNevaModel):
                 'media': batch.get('media', None),
                 "images": batch["images"],
                 "masks": batch["masks"],
-                # "seg_labels": batch["seg_labels"],
+                "mask_shapes": batch["mask_shapes"],
                 "resize": batch["resizes"],
                 "offset": batch["offsets"],
             }
