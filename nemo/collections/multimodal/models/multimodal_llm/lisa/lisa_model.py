@@ -287,8 +287,8 @@ class MCoreLisaModel(MCoreNevaModel):
         # kwargs["media"] = images_clip
 
         resizes = kwargs.pop("resize", None)
-        seg_labels = kwargs.pop("seg_labels", None)
-        masks_list = kwargs.pop("masks", None)
+        # seg_labels = kwargs.pop("seg_labels", None)
+        gt_masks_labels = kwargs.pop("masks", None)
 
         neva_output = super().forward(*args, **kwargs)
         # NV LISA Example
@@ -359,14 +359,14 @@ class MCoreLisaModel(MCoreNevaModel):
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resizes[i],
-                original_size=seg_labels[i, 0].shape,
+                original_size=gt_masks_labels[i].shape[1:],
             )
             pred_masks.append(pred_mask[:, 0])
 
         # pred_masks 0: torch.Size([3, 1365, 2048])
-        if seg_labels != None and "labels" in kwargs:
+        if gt_masks_labels != None and "labels" in kwargs:
             # last PP stage or inference
-            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], seg_labels)
+            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels)
 
         pred_masks = torch.stack(pred_masks, dim=0)
         return gpt_logits.transpose(0, 1).contiguous(), pred_masks
@@ -483,30 +483,30 @@ class MegatronLisaModel(MegatronNevaModel):
             return NotImplemented
 
     def forward(self, images, 
-                images_clip, 
+                media, 
                 tokens,
                 position_ids,
                 labels, 
                 attention_mask,
-                offset, 
-                masks_list, 
-                label_list, 
-                resize_list):
+                offsets, 
+                masks, 
+                seg_labels, 
+                resizes):
         
         forward_args = {
-            'input_ids': tokens,
-            'position_ids': position_ids,
-            'attention_mask': attention_mask,
-            'labels': labels,
-            'media': images_clip, # since neva uses media and need clip processed
-            'offset': offset,
-            'masks_list': masks_list,
-            "label_list": label_list,
-            "resize_list": resize_list,
-            "images": images,
-        }
-        output_tensor = self.model(**forward_args)
-        return output_tensor
+                'input_ids': tokens,
+                'position_ids': position_ids,
+                'attention_mask': attention_mask,
+                'labels': labels,
+                'media': media,
+                "images": images,
+                "masks": masks,
+                # "seg_labels": seg_labels,
+                "resize": resizes,
+                "offset": offsets,
+            }
+        outputs = self.model(**forward_args)
+        return outputs
 
     
     # TODO: probably have to override cause of new losses
@@ -517,8 +517,6 @@ class MegatronLisaModel(MegatronNevaModel):
         return super().validation_step(dataloader_iter)
     
     def setup(self, stage=None):
-        #TODO: probably override it. Not sure whether # of params logged in MegatronNevaModel.setup()
-        # includes LM + Embedding (including Clip) + SAM + text to vision FC
         # This sets up datasets internally
         super().setup(stage)
     
@@ -631,7 +629,7 @@ class MegatronLisaModel(MegatronNevaModel):
                 'media': batch.get('media', None),
                 "images": batch["images"],
                 "masks": batch["masks"],
-                "seg_labels": batch["seg_labels"],
+                # "seg_labels": batch["seg_labels"],
                 "resize": batch["resizes"],
                 "offset": batch["offsets"],
             }

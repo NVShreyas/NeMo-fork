@@ -341,8 +341,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         
         tokens = tokens[0]
         labels = labels[0]
-        seg_labels = seg_labels.unsqueeze(0)
-        masks = masks.unsqueeze(0)
+        masks = masks.float()
 
         if self.split == "train":
             return dict(
@@ -416,7 +415,7 @@ class DataCollatorForSegmentationDataset(object):
             'media': media,
             "images": batch["image"],
             "masks": batch["mask"],
-            "seg_labels": batch["seg_labels"],
+            # "seg_labels": batch["seg_labels"],
             "resizes": batch["resize"],
             "offsets": offset_list,
         }
