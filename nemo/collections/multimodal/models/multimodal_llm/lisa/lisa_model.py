@@ -22,6 +22,10 @@ from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset,
 from nemo.collections.multimodal.parts.utils import load_nemo_model_weights
 from nemo.collections.multimodal.losses.segmentation_losses import dice_loss, sigmoid_ce_loss
 from nemo.collections.nlp.losses.lm_loss import language_model_loss
+from nemo.collections.nlp.modules.common.megatron.utils import (
+    average_losses_across_data_parallel_group,
+    get_iterator_k_split,
+)
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -270,21 +274,20 @@ class MCoreLisaModel(MCoreNevaModel):
         #     dim=1,
         # )
 
-        # images_clip = kwargs.get("media", None)
-        # images_clip_list = []
+        images_clip = kwargs.get("media", None)
         offset = kwargs.pop("offset", None)
-
-        # TODO: doesn't matter for batch_size = 1.
-        # for i in range(len(offset) - 1):
-        #     start_i, end_i = offset[i], offset[i + 1]
-        #     images_clip_i = (
-        #         images_clip[i]
-        #         .expand(end_i - start_i, -1, -1, -1, -1)
-        #         .contiguous()
-        #     )
-        #     images_clip_list.append(images_clip_i)
-        # images_clip = torch.stack(images_clip_list, dim=0)
-        # kwargs["media"] = images_clip
+        images_clip_list = []
+        for i in range(len(offset) - 1):
+            start_i, end_i = offset[i], offset[i + 1]
+            images_clip_i = (
+                images_clip[i]
+                .unsqueeze(0)
+                .expand(end_i - start_i, -1, -1, -1, -1, -1)
+                .contiguous()
+            )
+            images_clip_list.append(images_clip_i)
+        images_clip = torch.cat(images_clip_list, dim=0)
+        kwargs["media"] = images_clip
 
         resizes = kwargs.pop("resize", None)
         # seg_labels = kwargs.pop("seg_labels", None)
@@ -297,21 +300,19 @@ class MCoreLisaModel(MCoreNevaModel):
         # LISA example
         ## llava output: [6, 447, 5120]
         ## seg_mask: [6, 447]
-        neva_output = torch.transpose(neva_output, 0, 1)
-
         gpt_output_layer_weight = None
         if self.share_embeddings_and_output_weights:
             gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight
         gpt_logits, _ = self.output_layer(neva_output, weight=gpt_output_layer_weight)
-        # import pdb; pdb.set_trace()
+
+        neva_output = torch.transpose(neva_output, 0, 1)
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
         hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
         
-        # TODO: verify this. shape mismatch here
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         
-        # embedding corresponding to seg token -> [bs, 256]
+        # embedding corresponding to seg token -> [b*n_s, 256]
         pred_embeddings = last_hidden_state[seg_token_mask]
 
         seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
@@ -319,9 +320,7 @@ class MCoreLisaModel(MCoreNevaModel):
         seg_token_offset = torch.cat(
             [torch.zeros(1).long().to(images.device), seg_token_offset], dim=0
         )
-        #import pdb; pdb.set_trace()
-        ## ANMOL: I think this logic needs to be fixed as offset is single entry element
-        #seg_token_offset = seg_token_offset[offset]
+        seg_token_offset = seg_token_offset[offset]
 
         pred_embeddings_ = []
         for i in range(len(seg_token_offset) - 1):
@@ -351,11 +350,7 @@ class MCoreLisaModel(MCoreNevaModel):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
-            # Neva-Lisa:
-            # (Pdb) image_embeddings.shape: torch.Size([1, 256, 64, 64])
-            # (Pdb) sparse_embeddings.shape: torch.Size([1, 1, 256])
-            # (Pdb) dense_embeddings.shape: torch.Size([1, 256, 64, 64])
-            # self.lisa_sam.sam.prompt_encoder.get_dense_pe(): torch.Size([1, 256, 64, 64])
+
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resizes[i],
@@ -363,13 +358,12 @@ class MCoreLisaModel(MCoreNevaModel):
             )
             pred_masks.append(pred_mask[:, 0])
 
-        # pred_masks 0: torch.Size([3, 1365, 2048])
         if gt_masks_labels != None and "labels" in kwargs:
             # last PP stage or inference
             return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels)
 
         pred_masks = torch.stack(pred_masks, dim=0)
-        return gpt_logits.transpose(0, 1).contiguous(), pred_masks
+        return gpt_logits.transpose(0, 1).contiguous()#, pred_masks
 
     def compute_losses(self, 
                        pred_masks: List[torch.Tensor], 
@@ -475,12 +469,7 @@ class MegatronLisaModel(MegatronNevaModel):
         return model
     
     def setup_optimizer_param_groups(self):
-        if self.cfg.mm_cfg.llm.freeze:
-            # this will freeze neva(llm) and clip-vit is already frozen
-            # This should also filter out params that don't have grad like SAM encoder
-            super().setup_optimizer_param_groups()
-        else:
-            return NotImplemented
+        super().setup_optimizer_param_groups()
 
     def forward(self, images, 
                 media, 
@@ -603,8 +592,13 @@ class MegatronLisaModel(MegatronNevaModel):
         )
 
     def get_forward_output_and_loss_func(self, validation_step=False, tuning=False):
-        def loss_func(output_tensor):
-            return self.loss_func(output_tensor)
+        def loss_func(output_tensor, loss_mask):
+            loss_for_ub = self.loss_func(loss_mask, output_tensor)
+            if validation_step and not self.cfg.data.get('validation_drop_last', True):
+                raise NotImplementedError(f"`validation_drop_last=False` is not implemented in Lisa!")
+            else:
+                reduced_loss = average_losses_across_data_parallel_group([loss_for_ub])
+                return loss_for_ub, dict(avg=reduced_loss[0].unsqueeze(0))
         
         def fwd_output_and_loss_func(dataloader_iter, model, checkpoint_activations_all_layers=None):
             batch = next(dataloader_iter)
@@ -636,9 +630,6 @@ class MegatronLisaModel(MegatronNevaModel):
 
             output_tensor = model(**forward_args)
 
-            return output_tensor, loss_func
+            return output_tensor, partial(loss_func, loss_mask=batch['loss_mask'])
         
         return fwd_output_and_loss_func
-    
-    def loss_func(self, output_tensor):
-        return output_tensor, 0.0

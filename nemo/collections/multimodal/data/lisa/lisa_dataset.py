@@ -286,16 +286,18 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             # example: [' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nIf you needed to change the volume or select a different radio station, what part of the radio would you adjust? Please respond with segmentation mask. [/INST] [SEG]. <extra_id_7>', ' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nTo modify the volume or switch to a different radio station, which section of the radio would you manipulate? Please respond with segmentation mask. [/INST] It is [SEG]. <extra_id_7>', ' [INST] <<SYS>>\nYou are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.\n<</SYS>>\n\n<image>\nIf we are looking at a close-up of a radio, which part of the radio should we adjust when selecting a different radio station or changing the volume? Please respond with segmentation mask. [/INST] Sure, it is [SEG]. <extra_id_7>']
             # masks.shape: torch.Size([3, 459, 800])
             # seg_labels.shape: torch.Size([459, 800])
-            import pdb; pdb.set_trace()
-
+            # import pdb; pdb.set_trace()
+            pass
+        
+        modified_conversations = []
         replace_token = (
             DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_PATCH_TOKEN * total_num_patches + DEFAULT_IM_END_TOKEN
         )
-        conversation = conversations[0].replace(
-            DEFAULT_IMAGE_TOKEN, replace_token
-        )
-        conversations = [conversation]
-        tokens = tokenize(texts=conversations, tokenizer=self.tokenizer, context_length=self.context_length, add_extra_token=self.add_extra_token,
+        for conversation in conversations:
+            modified_conversations.append(conversation.replace(
+                    DEFAULT_IMAGE_TOKEN, replace_token))
+        # conversations = [conversation]
+        tokens = tokenize(texts=modified_conversations, tokenizer=self.tokenizer, context_length=self.context_length, add_extra_token=self.add_extra_token,
         )
 
         # llama tricks
@@ -339,8 +341,8 @@ class ReasonSegDataset(torch.utils.data.Dataset):
             labels = torch.roll(labels, shifts=-1, dims=-1)
             labels[:, -1] = IGNORE_INDEX
         
-        tokens = tokens[0]
-        labels = labels[0]
+        tokens = tokens
+        labels = labels
         masks = masks.float()
 
         if self.split == "train":
@@ -375,7 +377,7 @@ class DataCollatorForSegmentationDataset(object):
     def __call__(self, instances):
         max_len = max(instance['tokens'].shape[0] for instance in instances)
         max_len = (max_len - 1) // 64 * 64 + 64
-        offset_list = []
+        offset_list = [0]
         count = 0
         for instance in instances:
             pad_len = max_len - instance['tokens'].shape[0]
@@ -390,6 +392,10 @@ class DataCollatorForSegmentationDataset(object):
         
         tokens = batch['tokens']
         labels = batch['labels']
+        # batch_size * num seqs, max seq len
+        _, _, max_len = tokens.shape
+        tokens = tokens.reshape(-1, max_len)
+        labels = labels.reshape(-1, max_len)
         media = batch.get('image_clip')
 
         attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
@@ -417,6 +423,6 @@ class DataCollatorForSegmentationDataset(object):
             "masks": batch["mask"],
             # "seg_labels": batch["seg_labels"],
             "resizes": batch["resize"],
-            "offsets": offset_list,
+            "offsets": torch.LongTensor(offset_list),
         }
         return batch
