@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Tuple
+from typing import Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +9,7 @@ from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import M
 from nemo.collections.vision.data.megatron.data_samplers import MegatronVisionPretrainingRandomSampler
 from pytorch_lightning.trainer.trainer import Trainer
 
-from nemo.collections.nlp.modules.common.megatron.utils import init_method_normal, scaled_init_method_normal
+from nemo.collections.nlp.modules.common.megatron.utils import init_method_normal
 from nemo.collections.multimodal.modules.sam.image_encoder import ImageEncoderViT
 from nemo.collections.multimodal.modules.sam.prompt_encoder import PromptEncoder
 from nemo.collections.multimodal.modules.sam.mask_decoder import MaskDecoder
@@ -20,6 +20,8 @@ from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import get
 from nemo.utils import logging
 from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset, DataCollatorForSegmentationDataset
 from nemo.collections.multimodal.parts.utils import load_nemo_model_weights
+from nemo.collections.multimodal.losses.segmentation_losses import dice_loss, sigmoid_ce_loss
+from nemo.collections.nlp.losses.lm_loss import language_model_loss
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -223,21 +225,24 @@ class MCoreLisaModel(MCoreNevaModel):
             self.dtype = torch.float32
         else:
             raise ValueError(f"Cannot recognize precision {model_config.precision}")
-        
+
+        if model_config.mm_cfg.llm.freeze:
+            self.freeze_llm(model_config.mm_cfg)
+
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
-        # self.output_layer = tensor_parallel.ColumnParallelLinear(
-        #         self.model_config.hidden_size,
-        #         vocab_size=kwargs["vocab_size"],
-        #         config=kwargs["config"],
-        #         init_method=self.model_config.init_method,
-        #         bias=False,
-        #         skip_bias_add=False,
-        #         gather_output=not self.parallel_output,
-        #         skip_weight_param_allocation=self.pre_process
-        #         and self.share_embeddings_and_output_weights,
-        #         embedding_activation_buffer=self.embedding_activation_buffer,
-        #         grad_output_buffer=self.grad_output_buffer,
-        #     )
+        self.share_embeddings_and_output_weights = model_config.share_embeddings_and_output_weights
+        self.output_layer = tensor_parallel.ColumnParallelLinear(
+                model_config.hidden_size,
+                kwargs["vocab_size"],
+                config=kwargs["config"],
+                init_method=init_method_normal(model_config.init_method_std),
+                bias=False,
+                skip_bias_add=False,
+                gather_output=False,
+                skip_weight_param_allocation=model_config.pre_process and model_config.share_embeddings_and_output_weights,
+                embedding_activation_buffer=None,
+                grad_output_buffer=None,
+            )
 
     def model_forward(self, *args, **kwargs):
         images = kwargs.pop('images', None)
@@ -281,8 +286,8 @@ class MCoreLisaModel(MCoreNevaModel):
         # images_clip = torch.stack(images_clip_list, dim=0)
         # kwargs["media"] = images_clip
 
-        resize_list = kwargs.pop("resize", None)
-        label_list = kwargs.pop("seg_labels", None)
+        resizes = kwargs.pop("resize", None)
+        seg_labels = kwargs.pop("seg_labels", None)
         masks_list = kwargs.pop("masks", None)
 
         neva_output = super().forward(*args, **kwargs)
@@ -293,6 +298,11 @@ class MCoreLisaModel(MCoreNevaModel):
         ## llava output: [6, 447, 5120]
         ## seg_mask: [6, 447]
         neva_output = torch.transpose(neva_output, 0, 1)
+
+        gpt_output_layer_weight = None
+        if self.share_embeddings_and_output_weights:
+            gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight
+        gpt_logits, _ = self.output_layer(neva_output, weight=gpt_output_layer_weight)
         # import pdb; pdb.set_trace()
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
@@ -348,26 +358,62 @@ class MCoreLisaModel(MCoreNevaModel):
             # self.lisa_sam.sam.prompt_encoder.get_dense_pe(): torch.Size([1, 256, 64, 64])
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
-                input_size=resize_list[i],
-                original_size=label_list[i].shape,
+                input_size=resizes[i],
+                original_size=seg_labels[i, 0].shape,
             )
             pred_masks.append(pred_mask[:, 0])
 
         # pred_masks 0: torch.Size([3, 1365, 2048])
-        return pred_masks
+        if seg_labels != None and "labels" in kwargs:
+            # last PP stage or inference
+            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], seg_labels)
+
+        pred_masks = torch.stack(pred_masks, dim=0)
+        return gpt_logits.transpose(0, 1).contiguous(), pred_masks
+
+    def compute_losses(self, 
+                       pred_masks: List[torch.Tensor], 
+                       gpt_logits: torch.Tensor,
+                       gpt_labels: torch.Tensor,
+                       seg_labels: torch.Tensor,
+                       lm_loss_weight=1.0,
+                       dice_loss_weight=0.5,
+                       bce_loss_weight=2.0):
+
+        lm_loss = language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
+        mask_bce_loss = 0
+        mask_dice_loss = 0
+        num_masks = 0
+
+        # TODO: vectorize
+        for i in range(len(pred_masks)):
+            seg_label = seg_labels[i]
+            pred_mask = pred_masks[i]
+
+            assert (
+                seg_label.shape[0] == pred_mask.shape[0]
+            ), f"seg_label.shape: {seg_label.shape}, pred_mask.shape: {pred_mask.shape}"
+
+            mask_bce_loss += (
+                sigmoid_ce_loss(pred_mask, seg_label, num_masks=seg_label.shape[0])
+                * seg_label.shape[0]
+            )
+            mask_dice_loss += (
+                dice_loss(pred_mask, seg_label, num_masks=seg_label.shape[0])
+                * seg_label.shape[0]
+            )
+            num_masks += seg_label.shape[0]
+
+        mask_bce_loss = bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
+        mask_dice_loss = dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
+        mask_loss = mask_bce_loss + mask_dice_loss
+
+        loss = lm_loss + mask_loss
+
+        return loss
+
 
     def forward(self, *args, **kwargs):
-        # Inputs:
-        # images: torch.FloatTensor,
-        # images_clip: torch.FloatTensor,
-        # input_ids: torch.LongTensor,
-        # labels: torch.LongTensor,
-        # attention_masks: torch.LongTensor,
-        # offset: torch.LongTensor,
-        # masks_list: List[torch.FloatTensor],
-        # label_list: List[torch.Tensor],
-        # resize_list: List[tuple],
-
         if self.dtype == torch.float32:
             return self.model_forward(*args, **kwargs)
         with torch.autocast(device_type="cuda", dtype=self.dtype):
@@ -467,7 +513,6 @@ class MegatronLisaModel(MegatronNevaModel):
     def training_step(self, dataloader_iter):
         return super().training_step(dataloader_iter)
 
-    # TODO: probably have to override cause of new losses
     def validation_step(self, dataloader_iter):
         return super().validation_step(dataloader_iter)
     

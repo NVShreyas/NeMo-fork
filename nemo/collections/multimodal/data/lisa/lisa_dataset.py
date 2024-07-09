@@ -337,6 +337,8 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         
         tokens = tokens[0]
         labels = labels[0]
+        seg_labels = seg_labels.unsqueeze(0)
+        masks = masks.unsqueeze(0)
 
         if self.split == "train":
             return dict(

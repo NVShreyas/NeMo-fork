@@ -872,6 +872,7 @@ class MegatronNevaModel(MultimodalAdapterModelMixin, MegatronGPTModel):
                     )
 
             output_tensor = model(**forward_args)
+            import pdb; pdb.set_trace()
 
             return output_tensor, partial(loss_func, loss_mask=batch.get('loss_mask'))
 
