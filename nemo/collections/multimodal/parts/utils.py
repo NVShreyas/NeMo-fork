@@ -22,7 +22,19 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from PIL import Image
 from pytorch_lightning import Trainer
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
-from transformers import CLIPImageProcessor, SiglipImageProcessor
+#from transformers import CLIPImageProcessor, SiglipImageProcessor
+from transformers import CLIPImageProcessor
+try:
+    from transformers import SiglipImageProcessor
+except:
+    import types
+    # Create a dummy module
+    dummy_module = types.ModuleType('dummy_module')
+    # Add it to sys.modules
+    import sys
+    sys.modules['SiglipImageProcessor'] = dummy_module
+    # Now you can import it without errors
+    import SiglipImageProcessor
 from nemo.collections.multimodal.data.clip.augmentations.augmentations import image_transform
 
 from nemo.collections.multimodal.data.neva.neva_dataset import process_image

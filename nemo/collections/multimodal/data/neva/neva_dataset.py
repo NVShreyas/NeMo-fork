@@ -29,7 +29,18 @@ from einops import rearrange
 from omegaconf import DictConfig
 from PIL import Image
 from torch.utils.data import Dataset, default_collate
-from transformers import CLIPImageProcessor, SiglipImageProcessor
+from transformers import CLIPImageProcessor
+try:
+    from transformers import SiglipImageProcessor
+except:
+    import types
+    # Create a dummy module
+    dummy_module = types.ModuleType('dummy_module')
+    # Add it to sys.modules
+    import sys
+    sys.modules['SiglipImageProcessor'] = dummy_module
+    # Now you can import it without errors
+    import SiglipImageProcessor
 
 import nemo.collections.multimodal.data.neva.conversation as conversation_lib
 from nemo.collections.multimodal.data.clip.augmentations.augmentations import image_transform
