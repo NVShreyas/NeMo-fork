@@ -37,6 +37,7 @@ except (ImportError, ModuleNotFoundError):
 
 try:
     from megatron.core import parallel_state, tensor_parallel
+    from megatron.core.transformer.custom_layers.transformer_engine import TENorm
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from megatron.core.models.gpt import GPTModel as MCoreGPTModel
 
@@ -235,6 +236,14 @@ class MCoreLisaModel(MCoreNevaModel):
 
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
         self.share_embeddings_and_output_weights = model_config.share_embeddings_and_output_weights
+
+        # Post-process was disabled in megatronGPT model, so we need to add these 2 layers back
+        # TODO for LISA, we should check if we use the input or ouput hidden states of the layernorm
+        self.final_layernorm = TENorm(
+                config=kwargs["config"],
+                hidden_size=model_config.hidden_size,
+                eps=kwargs["config"].layernorm_epsilon,
+            )
         self.output_layer = tensor_parallel.ColumnParallelLinear(
                 model_config.hidden_size,
                 kwargs["vocab_size"],
@@ -300,6 +309,8 @@ class MCoreLisaModel(MCoreNevaModel):
         # LISA example
         ## llava output: [6, 447, 5120]
         ## seg_mask: [6, 447]
+
+        neva_output = self.final_layernorm(neva_output)
         gpt_output_layer_weight = None
         if self.share_embeddings_and_output_weights:
             gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight

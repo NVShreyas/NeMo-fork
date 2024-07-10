@@ -94,6 +94,7 @@ def load_model(cls, checkpoint, strict, **kwargs):
         if 'cfg' in kwargs:
             model = ptl_load_state(cls, checkpoint, strict=strict, **kwargs)
         else:
+            #import pdb; pdb.set_trace()
             model = cls(cfg=checkpoint[cls.CHECKPOINT_HYPER_PARAMS_KEY], **kwargs)
             for name, module in model.named_parameters():
                 if name in checkpoint['state_dict']:
@@ -198,6 +199,7 @@ def convert(args):
     hf_config = vars(model.config)
     hf_config['tokenizer_model'] = str(tokenizer.vocab_file)
     print(f"hf_config: {hf_config}")
+    #import pdb; pdb.set_trace()
     print("named parameters:")
     for name, param in model.named_parameters():
         print(f"- {name}")
@@ -273,14 +275,15 @@ def convert(args):
         nemo_layer = layer.replace("model.visual_model", "model.lisa_sam.sam")
         orig_weight = model.state_dict()[layer]
         checkpoint['state_dict'][nemo_layer] = param_to_weights(orig_weight)
-
+    
+    #import pdb; pdb.set_trace()
 
     text_hidden_fcs_layers_list = [layer for layer in model.state_dict().keys() if layer.startswith("model.text_hidden_fcs")]
-    for layer in sam_layers_list:
+    for layer in text_hidden_fcs_layers_list:
         nemo_layer = layer.replace("model.text_hidden_fcs", "model.lisa_sam.text_hidden_fcs")
         orig_weight = model.state_dict()[layer]
         checkpoint['state_dict'][nemo_layer] = param_to_weights(orig_weight)
-
+    #import pdb; pdb.set_trace()
     # Multimodal projection
     if mcore_gpt:
         mm_projection_layer_base_name = (
@@ -304,14 +307,15 @@ def convert(args):
         embed_weights_base_name = f'model.language_model.embedding.word_embeddings.weight'
     checkpoint['state_dict'][embed_weights_base_name] = param_to_weights(embed_weight)
 
+    # TODO: check if this param is needed.
     # in hf, this is defined as register_buffer(..., persistent=False) so it won't be in the state dict
-    if f'model.layers.0.self_attn.rotary_emb.inv_freq' in model.state_dict():
-        rotary_embed_weight = model.state_dict()[f'model.layers.0.self_attn.rotary_emb.inv_freq']
-        if mcore_gpt:
-            rotary_embed_weight_base_name = f'model.rotary_pos_emb.inv_freq'
-        else:
-            rotary_embed_weight_base_name = f'model.language_model.rotary_pos_emb.inv_freq'
-        checkpoint['state_dict'][rotary_embed_weight_base_name] = param_to_weights(rotary_embed_weight)
+    # if f'model.layers.0.self_attn.rotary_emb.inv_freq' in model.state_dict():
+    #     rotary_embed_weight = model.state_dict()[f'model.layers.0.self_attn.rotary_emb.inv_freq']
+    #     if mcore_gpt:
+    #         rotary_embed_weight_base_name = f'model.rotary_pos_emb.inv_freq'
+    #     else:
+    #         rotary_embed_weight_base_name = f'model.language_model.rotary_pos_emb.inv_freq'
+    #     checkpoint['state_dict'][rotary_embed_weight_base_name] = param_to_weights(rotary_embed_weight)
 
     if nemo_config.num_query_groups is None or nemo_config.num_query_groups == head_num:
         num_query_groups = head_num
@@ -386,7 +390,7 @@ def convert(args):
 
     final_ln_weight = model.state_dict()[f'model.norm.weight']
     if mcore_gpt:
-        final_ln_base_name = f'model.decoder.final_layernorm.weight'
+        final_ln_base_name = f'model.final_layernorm.weight'
     else:
         final_ln_base_name = f'model.language_model.encoder.final_layernorm.weight'
     checkpoint['state_dict'][final_ln_base_name] = param_to_weights(final_ln_weight)
@@ -401,12 +405,12 @@ def convert(args):
     checkpoint[MegatronLisaModel.CHECKPOINT_HYPER_PARAMS_KEY] = nemo_config
 
     del model
-
+    #import pdb; pdb.set_trace()
     if nemo_config.get('megatron_amp_O2', False):
         keys = list(checkpoint['state_dict'].keys())
         for key in keys:
             checkpoint['state_dict'][key.replace('model.', 'model.module.', 1)] = checkpoint['state_dict'].pop(key)
-
+    #import pdb; pdb.set_trace()
     model = load_model(MegatronLisaModel, checkpoint, strict=False, trainer=trainer)
 
     model._save_restore_connector = NLPSaveRestoreConnector()
