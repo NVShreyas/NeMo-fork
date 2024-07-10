@@ -350,8 +350,13 @@ def setup_trainer_and_model_for_inference(
     return trainer, model
 
 
-def create_neva_model_and_processor(cfg):
-    from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MegatronNevaModel
+def create_neva_model_and_processor(cfg, model_type="neva"):
+    if model_type == "neva":
+        from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MegatronNevaModel as MegatronVLM
+    elif model_type == "lisa":
+        from nemo.collections.multimodal.models.multimodal_llm.lisa.lisa_model import MegatronLisaModel as MegatronVLM
+    else:
+        assert False, f"model={model_type} is not supported"
 
     plugins = []
     if cfg.get('cluster_type', None) == 'BCP':
@@ -369,7 +374,7 @@ def create_neva_model_and_processor(cfg):
         if os.path.isdir(cfg.neva_model_file):
             save_restore_connector.model_extracted_dir = cfg.neva_model_file
 
-        neva_cfg = MegatronNevaModel.restore_from(
+        neva_cfg = MegatronVLM.restore_from(
             restore_path=cfg.neva_model_file,
             trainer=trainer,
             return_config=True,
@@ -388,7 +393,7 @@ def create_neva_model_and_processor(cfg):
             neva_cfg.pipeline_model_parallel_size = cfg.pipeline_model_parallel_size
         #    neva_cfg.mm_cfg.vision_encoder.from_pretrained = None
 
-        model = MegatronNevaModel.restore_from(
+        model = MegatronVLM.restore_from(
             restore_path=cfg.neva_model_file,
             trainer=trainer,
             override_config_path=neva_cfg,
@@ -422,7 +427,7 @@ def create_neva_model_and_processor(cfg):
             )
         checkpoint_path = inject_model_parallel_rank(os.path.join(cfg.checkpoint_dir, cfg.checkpoint_name))
         # TODO: This wont work properly (We need to set model.llm.from_pretrained model.vision.from_pretrained to nul)
-        model = MegatronNevaModel.load_from_checkpoint(checkpoint_path, hparams_file=cfg.hparams_file, trainer=trainer)
+        model = MegatronVLM.load_from_checkpoint(checkpoint_path, hparams_file=cfg.hparams_file, trainer=trainer)
     else:
         raise ValueError("need at least a nemo file or checkpoint dir")
 

@@ -26,6 +26,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
     average_losses_across_data_parallel_group,
     get_iterator_k_split,
 )
+from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, OutputType, SamplingParam
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -441,7 +442,8 @@ class MegatronLisaModel(MegatronNevaModel):
         llm_type = self.cfg.mm_cfg.llm.get("model_type", "nvgpt")
         media_start_id = self.tokenizer.token_to_id(DEFAULT_IM_START_TOKEN[llm_type])
         media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
-        seg_token_id = self.tokenizer.token_to_id("[SEG]")
+        #seg_token_id = self.tokenizer.token_to_id("[SEG]")
+        seg_token_id = self.tokenizer.token_to_id("<extra_id_0>")
 
         if not parallel_state.is_initialized():
             def dummy():
@@ -662,3 +664,37 @@ class MegatronLisaModel(MegatronNevaModel):
             return output_tensor, partial(loss_func, loss_mask=batch['loss_mask'])
         
         return fwd_output_and_loss_func
+    
+    def generate(
+        self,
+        input_prompts,
+        inference_config,
+        length_params: LengthParam,
+        sampling_params: SamplingParam = None,
+    ) -> OutputType:
+
+        # check whether the DDP is initialized
+        if not parallel_state.is_initialized():
+
+            def dummy():
+                return
+
+            if self.trainer.strategy.launcher is not None:
+                self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
+            self.trainer.strategy.setup_environment()
+
+        # set the default sampling params if it is None.
+        # default do greedy sampling
+        if sampling_params is None:
+            sampling_params = get_default_sampling_params()
+
+        # set the default length params if it is None.
+        # default do greedy sampling
+        if length_params is None:
+            length_params = get_default_length_params()
+
+        # Supports only one prompt at a time
+        result = megatron_neva_generate(self.cuda(), input_prompts, length_params, sampling_params, inference_config)
+        # logits, masks = self.forward(data)
+
+        return result

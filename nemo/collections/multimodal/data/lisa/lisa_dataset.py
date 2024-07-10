@@ -222,7 +222,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                     DEFAULT_IMAGE_TOKEN
                     + "\n {} Please output segmentation mask.".format(text),
                 )
-                conv.append_message(conv.roles[1], "[SEG].")
+                conv.append_message(conv.roles[1], "<extra_id_0>.")
             else:
                 conv.append_message(
                     conv.roles[0],
@@ -231,7 +231,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                         text
                     ),
                 )
-                conv.append_message(conv.roles[1], "[SEG].")
+                conv.append_message(conv.roles[1], "<extra_id_0>.")
             conversations.append(conv.get_prompt())
             i += 1
         
@@ -302,6 +302,10 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         )
 
         # llama tricks
+        # LISA Checkpoint Tokens: 
+        ## tokenizer.convert_ids_to_tokens([32000, 32001, 32002])
+        ## ['[SEG]', '<im_start>', '<im_end>'] 
+        ## <extra_id_0>, <extra_id_1>, <extra_id_2>
         tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
         tokens[tokens == 32006] = 1  # <s>
         tokens[tokens == 32007] = 2  # </s>
