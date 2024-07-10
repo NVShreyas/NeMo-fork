@@ -26,6 +26,7 @@ def language_model_loss(labels: torch.Tensor,
     Returns:
         Tensor: Loss tensor of dimensions [batch size, sequence_length]
     """
+    assert HAVE_MEGATRON_CORE, "Megatron core not found. Check MCore installation or API path."
     # [b s] => [s b]
     labels = labels.transpose(0, 1).contiguous()
     if cross_entropy_loss_fusion:
