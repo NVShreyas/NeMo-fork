@@ -28,7 +28,8 @@ from nemo.collections.multimodal.data.lisa.utils import (
     DEFAULT_IM_END_TOKEN,
     DEFAULT_IM_START_TOKEN,
     IGNORE_INDEX,
-    DEFAULT_IMAGE_PATCH_TOKEN
+    DEFAULT_IMAGE_PATCH_TOKEN,
+    DEFAULT_SEG_TOKEN
 )    
 
 
@@ -222,7 +223,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                     DEFAULT_IMAGE_TOKEN
                     + "\n {} Please output segmentation mask.".format(text),
                 )
-                conv.append_message(conv.roles[1], "<extra_id_0>.")
+                conv.append_message(conv.roles[1], "[SEG].")
             else:
                 conv.append_message(
                     conv.roles[0],
@@ -231,7 +232,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
                         text
                     ),
                 )
-                conv.append_message(conv.roles[1], "<extra_id_0>.")
+                conv.append_message(conv.roles[1], "[SEG].")
             conversations.append(conv.get_prompt())
             i += 1
         
@@ -296,7 +297,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         )
         for conversation in conversations:
             modified_conversations.append(conversation.replace(
-                    DEFAULT_IMAGE_TOKEN, replace_token))
+                    DEFAULT_IMAGE_TOKEN, replace_token).replace("[SEG]", DEFAULT_SEG_TOKEN)) # 2nd replace is needed for Lisa tokenizer
         # conversations = [conversation]
         tokens = tokenize(texts=modified_conversations, tokenizer=self.tokenizer, context_length=self.context_length, add_extra_token=self.add_extra_token,
         )
@@ -306,7 +307,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         ## tokenizer.convert_ids_to_tokens([32000, 32001, 32002])
         ## ['[SEG]', '<im_start>', '<im_end>'] 
         ## <extra_id_0>, <extra_id_1>, <extra_id_2>
-        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
+        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN. embeddings for these tokens are replaced by image features.
         tokens[tokens == 32006] = 1  # <s>
         tokens[tokens == 32007] = 2  # </s>
         labels = tokens.clone().detach()

@@ -16,6 +16,7 @@ from nemo.collections.multimodal.modules.sam.mask_decoder import MaskDecoder
 from nemo.collections.multimodal.modules.sam.two_way_transformer import TwoWayTransformer
 from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MCoreNevaModel, MegatronNevaModel
 from nemo.collections.multimodal.data.neva.conversation import DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN
+from nemo.collections.multimodal.data.lisa.utils import DEFAULT_SEG_TOKEN
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import get_specs
 from nemo.utils import logging
 from nemo.collections.multimodal.data.lisa.lisa_dataset import ReasonSegDataset, DataCollatorForSegmentationDataset
@@ -251,10 +252,8 @@ class MCoreLisaModel(MCoreNevaModel):
             self.freeze_llm(model_config.mm_cfg)
 
         # HACK: since we need hidden_states from GPT so we need this to convert hidden states to logits for loss
-        self.share_embeddings_and_output_weights = model_config.share_embeddings_and_output_weights
-
         # Post-process was disabled in megatronGPT model, so we need to add these 2 layers back
-        # TODO for LISA, we should check if we use the input or ouput hidden states of the layernorm
+        self.share_embeddings_and_output_weights = model_config.share_embeddings_and_output_weights
         self.final_layernorm = TENorm(
                 config=kwargs["config"],
                 hidden_size=model_config.hidden_size,
@@ -318,12 +317,6 @@ class MCoreLisaModel(MCoreNevaModel):
         mask_shapes = kwargs.pop("mask_shapes", None)
         gt_masks_labels = kwargs.pop("masks", None)
         neva_output = super().forward(*args, **kwargs)
-        # NV LISA Example
-        ## seg_mask shape: [1, 384]
-        ## neva_output shape: [384, 1, 4096]
-        # LISA example
-        ## llava output: [6, 447, 5120]
-        ## seg_mask: [6, 447]
 
         neva_output = self.final_layernorm(neva_output)
         gpt_output_layer_weight = None
@@ -457,8 +450,7 @@ class MegatronLisaModel(MegatronNevaModel):
         llm_type = self.cfg.mm_cfg.llm.get("model_type", "nvgpt")
         media_start_id = self.tokenizer.token_to_id(DEFAULT_IM_START_TOKEN[llm_type])
         media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
-        #seg_token_id = self.tokenizer.token_to_id("[SEG]")
-        seg_token_id = self.tokenizer.token_to_id("<extra_id_0>")
+        seg_token_id = self.tokenizer.token_to_id(DEFAULT_SEG_TOKEN)
 
         if not parallel_state.is_initialized():
             def dummy():
@@ -533,7 +525,6 @@ class MegatronLisaModel(MegatronNevaModel):
         return outputs
 
     
-    # TODO: probably have to override cause of new losses
     def training_step(self, dataloader_iter):
         return super().training_step(dataloader_iter)
 
@@ -541,7 +532,6 @@ class MegatronLisaModel(MegatronNevaModel):
         return super().validation_step(dataloader_iter)
     
     def setup(self, stage=None):
-        # This sets up datasets internally
         super().setup(stage)
     
     def build_train_valid_test_datasets(self):
