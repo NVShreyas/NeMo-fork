@@ -13,6 +13,12 @@
 # limitations under the License.
 
 r"""
+
+pytorch 23.08 container from nvidia
+pip uninstall transformers
+pip install transformers==4.31.0
+pip install scikit-image
+
 Script to convert HuggingFace Lisa checkpoints into .nemo file.
   Example to run this conversion script:
     python convert_hf_lisa_to_nemolisa.py \
