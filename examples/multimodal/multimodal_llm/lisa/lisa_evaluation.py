@@ -213,13 +213,13 @@ def main(cfg) -> None:
         if 'prompt' not in prompt_dict:
             prompt_dict['prompt'] = prompt_dict['text']
         if insert_media_token == 'left':
-            prompt_dict['prompt'] = media_token + prompt_dict['prompt']
+            prompt_dict['prompt'] = media_token + "\n" + prompt_dict['prompt']
         elif insert_media_token == 'right':
             prompt_dict['prompt'] = prompt_dict['prompt'] + media_token
         if 'image' in prompt_dict:
             prompt_dict['image_path'] = prompt_dict['image']
             image_path=os.path.join(cfg.inference.media_base_path, prompt_dict['image'])
-            prompt_dict['image_clip'] = image_processor(image_path)
+            prompt_dict['image_clip'] = image_processor(image_path).cuda()
             image_np = cv2.imread(image_path)
             image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
             original_size_list = [image_np.shape[:2]]
@@ -230,13 +230,14 @@ def main(cfg) -> None:
                 .unsqueeze(0)
                 .cuda()
             )
-            image = image.bfloat16
+            image = image.bfloat16()
             prompt_dict['image'] = image
+            prompt_dict['resize'] = torch.Tensor(resize_list).cuda()
+            prompt_dict['original_size_list'] = original_size_list
         if 'video' in prompt_dict:
             prompt_dict['video_path'] = prompt_dict['video']
             prompt_dict['video'] = video_processor(os.path.join(cfg.inference.media_base_path, prompt_dict['video']))
         
-        import pdb; pdb.set_trace()
         final_prompts.append(prompt_dict)
     
 

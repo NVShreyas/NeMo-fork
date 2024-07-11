@@ -27,6 +27,21 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
     get_iterator_k_split,
 )
 from nemo.collections.nlp.modules.common.transformer.text_generation import LengthParam, OutputType, SamplingParam
+from nemo.collections.multimodal.data.neva.neva_dataset import tokenize
+# from nemo.collections.multimodal.data.lisa.utils import (
+#     get_mask_from_json, 
+#     ANSWER_LIST, 
+#     DEFAULT_IMAGE_TOKEN,
+#     EXPLANATORY_QUESTION_LIST, 
+#     LONG_QUESTION_LIST,
+#     SHORT_QUESTION_LIST,
+#     DEFAULT_IM_END_TOKEN,
+#     DEFAULT_IM_START_TOKEN,
+#     IGNORE_INDEX,
+#     DEFAULT_IMAGE_PATCH_TOKEN
+# )
+from nemo.collections.multimodal.data.neva import conversation as conversation_lib
+from nemo.collections.nlp.modules.common.megatron.utils import get_ltor_masks_and_position_ids
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -302,7 +317,6 @@ class MCoreLisaModel(MCoreNevaModel):
         resizes = kwargs.pop("resize", None)
         mask_shapes = kwargs.pop("mask_shapes", None)
         gt_masks_labels = kwargs.pop("masks", None)
-
         neva_output = super().forward(*args, **kwargs)
         # NV LISA Example
         ## seg_mask shape: [1, 384]
@@ -387,7 +401,8 @@ class MCoreLisaModel(MCoreNevaModel):
                        dice_loss_weight=0.5,
                        bce_loss_weight=2.0):
 
-        lm_loss = language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
+        lm_loss = 0
+        #language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
         mask_bce_loss = 0
         mask_dice_loss = 0
         num_masks = 0
@@ -672,7 +687,18 @@ class MegatronLisaModel(MegatronNevaModel):
         length_params: LengthParam,
         sampling_params: SamplingParam = None,
     ) -> OutputType:
-
+        IGNORE_INDEX = -1
+        IMAGE_TOKEN_INDEX = 32003
+        IMAGE_TOKEN = "<image>"
+        # Updated to follow neva
+        # DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
+        # DEFAULT_IM_START_TOKEN = "<im_start>"
+        # DEFAULT_IM_END_TOKEN = "<im_end>"
+        IMAGE_PATCH_TOKEN = "<extra_id_3>" #defaultdict(lambda: "<extra_id_3>")
+        IM_START_TOKEN = "<extra_id_1>" #defaultdict(lambda: "<extra_id_4>")
+        IM_END_TOKEN = "<extra_id_2>" #defaultdict(lambda: "<extra_id_5>")
+        media_start_id = 32001
+        media_end_id = 32002
         # check whether the DDP is initialized
         if not parallel_state.is_initialized():
 
@@ -683,18 +709,126 @@ class MegatronLisaModel(MegatronNevaModel):
                 self.trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
             self.trainer.strategy.setup_environment()
 
-        # set the default sampling params if it is None.
-        # default do greedy sampling
-        if sampling_params is None:
-            sampling_params = get_default_sampling_params()
+        llm_type = self.cfg.mm_cfg.llm.get("model_type", "nvgpt")
+        #seg_token_id = self.tokenizer.token_to_id("[SEG]")
+        seg_token_id = self.tokenizer.token_to_id("<extra_id_0>")
+        prompt = input_prompts[0]["prompt"]
+        image_clip = input_prompts[0]["image_clip"]
+        image = input_prompts[0]["image"]
+        resize = input_prompts[0]['resize']
+        patch_dim=self.cfg.mm_cfg.vision_encoder.patch_dim
+        mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type
+        context_length=self.cfg.encoder_seq_length
 
-        # set the default length params if it is None.
-        # default do greedy sampling
-        if length_params is None:
-            length_params = get_default_length_params()
+        height_num_patches = image_clip.shape[4] // patch_dim
+        width_num_patches = image_clip.shape[5] // patch_dim
 
-        # Supports only one prompt at a time
-        result = megatron_neva_generate(self.cuda(), input_prompts, length_params, sampling_params, inference_config)
-        # logits, masks = self.forward(data)
+        if mm_mlp_adapter_type == 'mlp_downsample':
+            if height_num_patches % 2 != 0:
+                height_num_patches += 1
+            if width_num_patches % 2 != 0:
+                width_num_patches += 1
+        
+        total_num_patches = height_num_patches * width_num_patches
+        template_type="llava_llama_2"
+        conv = conversation_lib.conv_templates[template_type].copy()
+        conv.messages = []
+        conv.append_message(conv.roles[0], prompt)
+        conv.append_message(conv.roles[1], '')
+        conversation = conv.get_prompt()
+        modified_conversations = []
+        replace_token = (
+            IM_START_TOKEN + IMAGE_PATCH_TOKEN * total_num_patches + IM_END_TOKEN
+        )
+        modified_conversations.append(conversation.replace(IMAGE_TOKEN, replace_token))
+        tokens = tokenize(texts=modified_conversations, tokenizer=self.tokenizer, context_length=context_length, add_extra_token=False)
+        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
+        tokens[tokens == 32006] = 1  # <s>
+        tokens[tokens == 32007] = 2  # </s>
+        tokens = F.pad(tokens, (0, 1), 'constant', 0)
+        attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                data=tokens,
+                eod_token=self.tokenizer.eos_id,
+                eod_mask_loss=False,
+                reset_attention_mask=False,
+                reset_position_ids=False,
+            )   
+        tokens[tokens == -1] = 0
+        exit_llm = False
+        args=()
+        kwargs={}
+        kwargs['input_ids'] = tokens.cuda()
+        kwargs['position_ids'] = position_ids.cuda()
+        kwargs['attention_mask'] = attention_mask.cuda()
+        kwargs['media'] = image_clip.cuda()
+
+        share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True)
+        while (not exit_llm):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                neva_output = super(MCoreLisaModel, self.model.module).forward(*args, **kwargs)
+                neva_output = self.model.module.final_layernorm(neva_output)
+                gpt_output_layer_weight = None
+                if share_embeddings_and_output_weights:
+                    gpt_output_layer_weight = self.model.module.decoder.embedding.word_embeddings.weight
+                gpt_logits, _ = self.model.module.output_layer(neva_output, weight=gpt_output_layer_weight)
+
+                new_token_id = gpt_logits.squeeze()[-1].argmax()
+                new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
+                print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
+                user_input = input("Enter 0 to exit, 1 to continue: ")
+                try:
+                    user_input = int(user_input)
+                except:
+                    print("Incorrect input. Only 0 and 1 are allowed")
+                    break
+                if user_input:
+                    tokens = F.pad(tokens, (0, 1), 'constant', new_token_id.item())
+                    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                            data=tokens,
+                            eod_token=self.tokenizer.eos_id,
+                            eod_mask_loss=False,
+                            reset_attention_mask=False,
+                            reset_position_ids=False,
+                        )   
+                    tokens[tokens == -1] = 0
+                    args=()
+                    kwargs={}
+                    kwargs['input_ids'] = tokens.cuda()
+                    kwargs['position_ids'] = position_ids.cuda()
+                    kwargs['attention_mask'] = attention_mask.cuda()
+                    kwargs['media'] = image_clip.cuda()
+                else:
+                    break
+        #return self.model_forward(*args, **kwargs)
+        #while (not exit_llm):
+        import pdb; pdb.set_trace()
+        print("hello")
+
+        # (Pdb) image.shape
+        # torch.Size([1, 3, 1024, 1024])
+        # (Pdb) image_clip.shape
+        # torch.Size([1, 1, 1, 3, 224, 224])
+        # (Pdb) tokens.shape
+        # torch.Size([1, 360])
+        # (Pdb) resize
+        # tensor([[ 768., 1024.]])
+        # offset = torch.LongTensor([0, 1])
+
+
+        #with torch.no_grad():
+
+        # # set the default sampling params if it is None.
+        # # default do greedy sampling
+        # if sampling_params is None:
+        #     sampling_params = get_default_sampling_params()
+
+        # # set the default length params if it is None.
+        # # default do greedy sampling
+        # if length_params is None:
+        #     length_params = get_default_length_params()
+
+        # # Supports only one prompt at a time
+        # result = megatron_neva_generate(self.cuda(), input_prompts, length_params, sampling_params, inference_config)
+        # # logits, masks = self.forward(data)
 
         return result
