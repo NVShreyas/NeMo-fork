@@ -14,6 +14,12 @@
 
 r"""
 
+SCRIPT SETUP
+Tested it on Nemo 24.05 container.
+LISA uses a different transformers version, so you can run this script after modifying the nemo container as follows
+pip uninstall transformers
+pip install transformers==4.31.0
+
 Script to convert HuggingFace Lisa checkpoints into .nemo file.
   Example to run this conversion script:
     python convert_hf_lisa_to_nemolisa.py \
