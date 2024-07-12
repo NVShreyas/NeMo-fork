@@ -328,10 +328,11 @@ class MCoreLisaModel(MCoreNevaModel):
         if self.share_embeddings_and_output_weights:
             gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight
         gpt_logits, _ = self.output_layer(neva_output, weight=gpt_output_layer_weight)
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         neva_output = torch.transpose(neva_output, 0, 1)
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
+        #import pdb; pdb.set_trace()
         hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
         
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
@@ -742,12 +743,13 @@ class MegatronLisaModel(MegatronNevaModel):
         )
         #modified_conversations.append(custom_prompts.replace(IMAGE_TOKEN, replace_token))
         modified_conversations.append(conversation.replace(IMAGE_TOKEN, replace_token))
+        print(modified_conversations)
         tokens = tokenize(texts=modified_conversations, tokenizer=self.tokenizer, context_length=context_length, add_extra_token=False)
         
         tokens[tokens == 32000] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
         tokens[tokens == 32006] = 1  # <s>
         tokens[tokens == 32007] = 2  # </s>
-        tokens = F.pad(tokens, (0, 1), 'constant', 0)
+        #tokens = F.pad(tokens, (0, 1), 'constant', 0)
         attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
                 data=tokens,
                 eod_token=self.tokenizer.eos_id,
@@ -812,7 +814,8 @@ class MegatronLisaModel(MegatronNevaModel):
         pred_mask = None
         if found_seg_token:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                seg_hidden_states = neva_output[-1]
+                seg_hidden_states = neva_output_ln[-1]
+                #import pdb; pdb.set_trace()
                 pred_embedding = self.model.module.lisa_sam.text_hidden_fcs[0](seg_hidden_states)
                 multimask_output = False
                 (
