@@ -780,13 +780,14 @@ class MegatronLisaModel(MegatronNevaModel):
                 new_token_id = gpt_logits.squeeze()[-1][:32004].argmax()
                 new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
                 print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
-                if found_seg_token:
-                    print(tokens)
-                    print(f"Got the output hidden states for SEG token, breaking from the llm loop")
-                    break
+                # if found_seg_token:
+                #     print(tokens)
+                #     print(f"Got the output hidden states for SEG token, breaking from the llm loop")
+                #     break
                 if int(new_token_id.item()) == 32003:
                     print(f"Found SEG token")
                     found_seg_token = True
+                    break
 
                 user_input = input("Enter 0 to exit, 1 to continue: ")
                 try:
