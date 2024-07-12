@@ -5,7 +5,7 @@ trainer:
   devices: 1
   num_nodes: 1
   accelerator: gpu
-  precision: bf16
+  precision: fp32
   logger: False # logger provided by exp_manager
   enable_checkpointing: False
   use_distributed_sampler: False
@@ -185,7 +185,7 @@ model:
   use_emha: False # Use fused multi-head attention for large sequence-length. Note this is not yet supported. Please set to False.
 
   # Megatron O2-style half-precision
-  megatron_amp_O2: True # Enable O2-level automatic mixed precision using main parameters
+  megatron_amp_O2: False # Enable O2-level automatic mixed precision using main parameters
   async_grad_allreduce: False
   grad_allreduce_chunk_size_mb: 125
   grad_div_ar_fusion: True # Fuse grad division into torch.distributed.all_reduce
