@@ -5,7 +5,7 @@ trainer:
   devices: 1
   num_nodes: 1
   accelerator: gpu
-  precision: fp32
+  precision: 32
   logger: False # logger provided by exp_manager
   enable_checkpointing: False
   use_distributed_sampler: False
