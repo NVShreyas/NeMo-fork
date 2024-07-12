@@ -328,7 +328,7 @@ class MCoreLisaModel(MCoreNevaModel):
         if self.share_embeddings_and_output_weights:
             gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight
         gpt_logits, _ = self.output_layer(neva_output, weight=gpt_output_layer_weight)
-
+        import pdb; pdb.set_trace()
         neva_output = torch.transpose(neva_output, 0, 1)
         hidden_states = []
         # make sure we are getting the hidden states from the last PP stage in MCore.
@@ -457,9 +457,9 @@ class MegatronLisaModel(MegatronNevaModel):
         media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
         seg_token_id = self.tokenizer.token_to_id(DEFAULT_SEG_TOKEN)
 
-        media_start_id = 32001
-        media_end_id = 32002
-        seg_token_id = 32003
+        # media_start_id = 32001
+        # media_end_id = 32002
+        # seg_token_id = 32003
         if not parallel_state.is_initialized():
             def dummy():
                 return
@@ -714,7 +714,8 @@ class MegatronLisaModel(MegatronNevaModel):
         prompt = input_prompts[0]["prompt"]
         image_clip = input_prompts[0]["image_clip"]
         image = input_prompts[0]["image"]
-        resize = input_prompts[0]['resize']
+        resize_list = input_prompts[0]['resize_list']
+        original_size_list = input_prompts[0]['original_size_list']
         patch_dim=self.cfg.mm_cfg.vision_encoder.patch_dim
         mm_mlp_adapter_type=self.cfg.mm_cfg.mm_mlp_adapter_type
         context_length=self.cfg.encoder_seq_length
@@ -764,18 +765,24 @@ class MegatronLisaModel(MegatronNevaModel):
         kwargs['media'] = image_clip.cuda()
 
         share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True)
+        found_seg_token = False
         while (not exit_llm):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 neva_output = super(MCoreLisaModel, self.model.module).forward(*args, **kwargs)
-                neva_output = self.model.module.final_layernorm(neva_output)
+                neva_output_ln = self.model.module.final_layernorm(neva_output)
                 gpt_output_layer_weight = None
                 if share_embeddings_and_output_weights:
                     gpt_output_layer_weight = self.model.module.decoder.embedding.word_embeddings.weight
-                gpt_logits, _ = self.model.module.output_layer(neva_output, weight=gpt_output_layer_weight)
+                gpt_logits, _ = self.model.module.output_layer(neva_output_ln, weight=gpt_output_layer_weight)
 
                 new_token_id = gpt_logits.squeeze()[-1][:32004].argmax()
                 new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
                 print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
+                if int(new_token_id.item()) == 32003:
+                    print(f"Found SEG token, breaking from the llm loop")
+                    found_seg_token = True
+                    break
+
                 user_input = input("Enter 0 to exit, 1 to continue: ")
                 try:
                     user_input = int(user_input)
@@ -802,34 +809,34 @@ class MegatronLisaModel(MegatronNevaModel):
                     break
         #return self.model_forward(*args, **kwargs)
         #while (not exit_llm):
-        import pdb; pdb.set_trace()
-        print("hello")
-
-        # (Pdb) image.shape
-        # torch.Size([1, 3, 1024, 1024])
-        # (Pdb) image_clip.shape
-        # torch.Size([1, 1, 1, 3, 224, 224])
-        # (Pdb) tokens.shape
-        # torch.Size([1, 360])
-        # (Pdb) resize
-        # tensor([[ 768., 1024.]])
-        # offset = torch.LongTensor([0, 1])
-
-
-        #with torch.no_grad():
-
-        # # set the default sampling params if it is None.
-        # # default do greedy sampling
-        # if sampling_params is None:
-        #     sampling_params = get_default_sampling_params()
-
-        # # set the default length params if it is None.
-        # # default do greedy sampling
-        # if length_params is None:
-        #     length_params = get_default_length_params()
-
-        # # Supports only one prompt at a time
-        # result = megatron_neva_generate(self.cuda(), input_prompts, length_params, sampling_params, inference_config)
-        # # logits, masks = self.forward(data)
-
-        return result
+        pred_mask = None
+        if found_seg_token:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                seg_hidden_states = neva_output[-1]
+                pred_embedding = self.model.module.lisa_sam.text_hidden_fcs[0](seg_hidden_states)
+                multimask_output = False
+                (
+                    sparse_embeddings,
+                    dense_embeddings,
+                ) = self.model.module.lisa_sam.sam.prompt_encoder(
+                    points=None,
+                    boxes=None,
+                    masks=None,
+                    text_embeds=pred_embedding.unsqueeze(1),
+                )
+                sparse_embeddings = sparse_embeddings.to(pred_embedding.dtype)
+                image_embeddings = self.model.module.lisa_sam.sam.get_visual_embs(image)
+                low_res_masks, iou_predictions = self.model.module.lisa_sam.sam.mask_decoder(
+                    image_embeddings=image_embeddings,  
+                    image_pe=self.model.module.lisa_sam.sam.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=multimask_output,
+                )
+                #image_embeddings[0].shape: torch.Size([256, 64, 64])
+                pred_mask = self.model.module.lisa_sam.sam.postprocess_masks(
+                    low_res_masks,
+                    input_size=resize_list,
+                    original_size=original_size_list[0].int(),
+                )
+        return pred_mask

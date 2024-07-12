@@ -232,43 +232,33 @@ def main(cfg) -> None:
             )
             image = image.bfloat16()
             prompt_dict['image'] = image
-            prompt_dict['resize'] = torch.Tensor(resize_list).cuda()
-            prompt_dict['original_size_list'] = original_size_list
+            prompt_dict['resize_list'] = torch.Tensor(resize_list).cuda()
+            prompt_dict['original_size_list'] = torch.Tensor(original_size_list).cuda()
         if 'video' in prompt_dict:
             prompt_dict['video_path'] = prompt_dict['video']
             prompt_dict['video'] = video_processor(os.path.join(cfg.inference.media_base_path, prompt_dict['video']))
         
         final_prompts.append(prompt_dict)
     
+        pred_mask = model.generate(
+            input_prompts=final_prompts, length_params=length_params, sampling_params=sampling_params, inference_config=cfg
+        )
+        if torch.is_tensor(pred_mask):
+            pred_mask = pred_mask.detach().cpu().numpy()[0][0]
+            pred_mask = pred_mask > 0
+            save_path = cfg.output_mask_image_file
+            cv2.imwrite(save_path, pred_mask * 100)
+            print("{} has been saved.".format(save_path))
 
-
-    responses = model.generate(
-        input_prompts=final_prompts, length_params=length_params, sampling_params=sampling_params, inference_config=cfg
-    )
-
-    # PP middle stages do not yield any responses
-    if responses is None:
-        return
-
-    if is_global_rank_zero():
-        results = []
-        for response, prompt in zip(responses, final_prompts):
-            prompt['full_text'] = response["clean_text"]
-            prompt['text'] = response["clean_response"]
-            prompt['model_id'] = cfg.neva_model_file
-            if 'image_path' in prompt:
-                prompt['image'] = prompt.pop('image_path')
-            if 'video_path' in prompt:
-                prompt['video'] = prompt.pop('video_path')
-            if 'answer_id' not in prompt:
-                prompt['answer_id'] = 0
-            if 'metadata' not in prompt:
-                prompt['metadata'] = {}
-            results.append(prompt)
-
-        with open(cfg.output_file, 'w') as f:
-            for result in results:
-                f.write(json.dumps(result) + '\n')
+            save_path = cfg.output_seg_image_file
+            save_img = image_np.copy()
+            save_img[pred_mask] = (
+                image_np * 0.5
+                + pred_mask[:, :, None].astype(np.uint8) * np.array([255, 0, 0]) * 0.5
+            )[pred_mask]
+            save_img = cv2.cvtColor(save_img, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(save_path, save_img)
+            print("{} has been saved.".format(save_path))
 
 
 if __name__ == '__main__':
