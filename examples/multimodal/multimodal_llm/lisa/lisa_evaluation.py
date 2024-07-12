@@ -230,7 +230,7 @@ def main(cfg) -> None:
                 .unsqueeze(0)
                 .cuda()
             )
-            image = image.bfloat16()
+            # image = image.bfloat16()
             prompt_dict['image'] = image
             prompt_dict['resize_list'] = torch.Tensor(resize_list).cuda()
             prompt_dict['original_size_list'] = torch.Tensor(original_size_list).cuda()

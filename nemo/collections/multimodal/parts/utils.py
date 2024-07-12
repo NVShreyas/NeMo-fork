@@ -392,7 +392,7 @@ def create_neva_model_and_processor(cfg, model_type="neva"):
             neva_cfg.tensor_model_parallel_size = cfg.tensor_model_parallel_size
             neva_cfg.pipeline_model_parallel_size = cfg.pipeline_model_parallel_size
         #    neva_cfg.mm_cfg.vision_encoder.from_pretrained = None
-
+        assert neva_cfg.precision in [32, '32', '32-true', 'fp32'], "Only fp32 supported in lisa for now"
         model = MegatronVLM.restore_from(
             restore_path=cfg.neva_model_file,
             trainer=trainer,
@@ -455,7 +455,7 @@ def create_neva_model_and_processor(cfg, model_type="neva"):
         image = process_image(processor, image, neva_cfg.data.image_aspect_ratio)
         if neva_cfg.precision in [16, '16', '16-mixed']:
             media = image.type(torch.float16)
-        elif neva_cfg.precision in [32, '32', '32-true']:
+        elif neva_cfg.precision in [32, '32', '32-true', 'fp32']:
             media = image.type(torch.float32)
         else:
             media = image.type(torch.bfloat16)

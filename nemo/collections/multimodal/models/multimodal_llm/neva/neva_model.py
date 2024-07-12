@@ -312,9 +312,9 @@ class NevaBaseModel:
             if "clip" in mm_cfg.vision_encoder.from_pretrained:
                 vision_encoder = CLIPVisionModel.from_pretrained(
                     mm_cfg.vision_encoder.from_pretrained,
-                    torch_dtype=torch.bfloat16,
+                    torch_dtype=torch.float32,
                 ).cuda()
-                vision_encoder = vision_encoder.to(torch.bfloat16)
+                vision_encoder = vision_encoder.to(torch.float32)
                 if mm_cfg.vision_encoder.freeze:
                     for param in vision_encoder.parameters():
                         param.requires_grad = False
@@ -322,9 +322,9 @@ class NevaBaseModel:
             elif "siglip" in mm_cfg.vision_encoder.from_pretrained:
                 vision_encoder = SiglipVisionModel.from_pretrained(
                     mm_cfg.vision_encoder.from_pretrained,
-                    torch_dtype=torch.bfloat16,
+                    torch_dtype=torch.float32,
                 ).cuda()
-                vision_encoder = vision_encoder.to(torch.bfloat16)
+                vision_encoder = vision_encoder.to(torch.float32)
                 if mm_cfg.vision_encoder.freeze:
                     for param in vision_encoder.parameters():
                         param.requires_grad = False
@@ -1218,6 +1218,8 @@ class MegatronNevaModel(MultimodalAdapterModelMixin, MegatronGPTModel):
 
         original_sharded_state_dict = super().sharded_state_dict()
         keys_to_keep = self.get_keys_to_keep()
+        #TODO: this breaks. It can't find this tensor in the sharded dict, probably the reason why its not loaded.
+        # keys_to_keep.append("model.lisa_sam.sam.prompt_encoder.pe_layer.positional_encoding_gaussian_matrix")
         new_sharded_state_dict = {k: original_sharded_state_dict[k] for k in keys_to_keep}
         return new_sharded_state_dict
 

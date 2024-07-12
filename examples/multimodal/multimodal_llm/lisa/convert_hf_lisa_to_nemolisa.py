@@ -157,6 +157,8 @@ def load_config(args, lisa_config):
     nemo_config.activation = 'fast-swiglu'
     nemo_config.data.conv_template = args.conv_template
     nemo_config.mm_cfg.model_type = args.conv_template
+    # This is needed to "keep keys" for LLM in neva.
+    nemo_config.mm_cfg.llm.freeze = False
     if args.tokenizer_model is None:
         nemo_config.tokenizer.model = lisa_config['tokenizer_model']
     else:
@@ -188,7 +190,7 @@ def convert(args):
     tokenizer.pad_token = tokenizer.unk_token
     seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     vision_tower="openai/clip-vit-large-patch14"
-    torch_dtype = torch.bfloat16
+    torch_dtype = torch.float32
     kwargs = {"torch_dtype": torch_dtype}
     model = LISAForCausalLM.from_pretrained(
         args.in_file, low_cpu_mem_usage=True, vision_tower=vision_tower, seg_token_idx=seg_token_idx, **kwargs

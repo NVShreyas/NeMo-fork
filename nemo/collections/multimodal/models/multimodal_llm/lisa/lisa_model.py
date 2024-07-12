@@ -248,7 +248,7 @@ class MCoreLisaModel(MCoreNevaModel):
             self.dtype = torch.bfloat16
         elif model_config.precision in [16, '16', '16-mixed']:
             self.dtype = torch.float16
-        elif model_config.precision in [32, '32', '32-true']:
+        elif model_config.precision in [32, '32', '32-true', 'fp32']:
             self.dtype = torch.float32
         else:
             raise ValueError(f"Cannot recognize precision {model_config.precision}")
@@ -458,9 +458,10 @@ class MegatronLisaModel(MegatronNevaModel):
         media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
         seg_token_id = self.tokenizer.token_to_id(DEFAULT_SEG_TOKEN)
 
-        # media_start_id = 32001
-        # media_end_id = 32002
-        # seg_token_id = 32003
+        # Needed while initializing the model to map it correctly.
+        media_start_id = 32001
+        media_end_id = 32002
+        seg_token_id = 32003
         if not parallel_state.is_initialized():
             def dummy():
                 return
@@ -769,80 +770,94 @@ class MegatronLisaModel(MegatronNevaModel):
         share_embeddings_and_output_weights=self.cfg.get('share_embeddings_and_output_weights', True)
         found_seg_token = False
         while (not exit_llm):
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                neva_output = super(MCoreLisaModel, self.model.module).forward(*args, **kwargs)
-                neva_output_ln = self.model.module.final_layernorm(neva_output)
-                gpt_output_layer_weight = None
-                if share_embeddings_and_output_weights:
-                    gpt_output_layer_weight = self.model.module.decoder.embedding.word_embeddings.weight
-                gpt_logits, _ = self.model.module.output_layer(neva_output_ln, weight=gpt_output_layer_weight)
+            neva_output = super(MCoreLisaModel, self.model).forward(*args, **kwargs)
+            neva_output_ln = self.model.final_layernorm(neva_output)
+            gpt_output_layer_weight = None
+            if share_embeddings_and_output_weights:
+                gpt_output_layer_weight = self.model.decoder.embedding.word_embeddings.weight
+            gpt_logits, _ = self.model.output_layer(neva_output_ln, weight=gpt_output_layer_weight)
 
-                new_token_id = gpt_logits.squeeze()[-1][:32004].argmax()
-                new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
-                print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
-                if found_seg_token:
-                    print(tokens)
-                    print(f"Got the output hidden states for SEG token, breaking from the llm loop")
-                    break
-                if int(new_token_id.item()) == 32003:
-                    print(f"Found SEG token")
-                    found_seg_token = True
+            new_token_id = gpt_logits.squeeze()[-1][:32004].argmax()
+            new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
+            print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
+            # if found_seg_token:
+            #     print(tokens)
+            #     print(f"Got the output hidden states for SEG token, breaking from the llm loop")
+            #     break
+            if int(new_token_id.item()) == 32003:
+                print(f"Found SEG token")
+                found_seg_token = True
+                break
 
-                user_input = input("Enter 0 to exit, 1 to continue: ")
-                try:
-                    user_input = int(user_input)
-                except:
-                    print("Incorrect input. Only 0 and 1 are allowed")
-                    break
-                if user_input:
-                    tokens = F.pad(tokens, (0, 1), 'constant', new_token_id.item())
-                    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-                            data=tokens,
-                            eod_token=self.tokenizer.eos_id,
-                            eod_mask_loss=False,
-                            reset_attention_mask=False,
-                            reset_position_ids=False,
-                        )   
-                    tokens[tokens == -1] = 0
-                    args=()
-                    kwargs={}
-                    kwargs['input_ids'] = tokens.cuda()
-                    kwargs['position_ids'] = position_ids.cuda()
-                    kwargs['attention_mask'] = attention_mask.cuda()
-                    kwargs['media'] = image_clip.cuda()
-                else:
-                    break
+            user_input = input("Enter 0 to exit, 1 to continue: ")
+            try:
+                user_input = int(user_input)
+            except:
+                print("Incorrect input. Only 0 and 1 are allowed")
+                break
+            if user_input:
+                tokens = F.pad(tokens, (0, 1), 'constant', new_token_id.item())
+                attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+                        data=tokens,
+                        eod_token=self.tokenizer.eos_id,
+                        eod_mask_loss=False,
+                        reset_attention_mask=False,
+                        reset_position_ids=False,
+                    )   
+                tokens[tokens == -1] = 0
+                args=()
+                kwargs={}
+                kwargs['input_ids'] = tokens.cuda()
+                kwargs['position_ids'] = position_ids.cuda()
+                kwargs['attention_mask'] = attention_mask.cuda()
+                kwargs['media'] = image_clip.cuda()
+            else:
+                break
         #return self.model_forward(*args, **kwargs)
         #while (not exit_llm):
         pred_mask = None
         if found_seg_token:
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                seg_hidden_states = neva_output_ln[-1]
-                #import pdb; pdb.set_trace()
-                pred_embedding = self.model.module.lisa_sam.text_hidden_fcs[0](seg_hidden_states)
-                multimask_output = False
-                (
-                    sparse_embeddings,
-                    dense_embeddings,
-                ) = self.model.module.lisa_sam.sam.prompt_encoder(
-                    points=None,
-                    boxes=None,
-                    masks=None,
-                    text_embeds=pred_embedding.unsqueeze(1),
-                )
-                sparse_embeddings = sparse_embeddings.to(pred_embedding.dtype)
-                image_embeddings = self.model.module.lisa_sam.sam.get_visual_embs(image)
-                low_res_masks, iou_predictions = self.model.module.lisa_sam.sam.mask_decoder(
-                    image_embeddings=image_embeddings,  
-                    image_pe=self.model.module.lisa_sam.sam.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=sparse_embeddings,
-                    dense_prompt_embeddings=dense_embeddings,
-                    multimask_output=multimask_output,
-                )
-                #image_embeddings[0].shape: torch.Size([256, 64, 64])
-                pred_mask = self.model.module.lisa_sam.sam.postprocess_masks(
-                    low_res_masks,
-                    input_size=resize_list,
-                    original_size=original_size_list[0].int(),
-                )
+            # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # lisa_llava_out = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/output_hidden_states_fp32.pt").cuda()
+            # print((lisa_llava_out.abs() - neva_output_ln.abs()).abs().mean())
+            pred_embedding = self.model.lisa_sam.text_hidden_fcs[0](neva_output_ln)
+            pred_embedding = pred_embedding[-1]
+            # pred_embedding = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/pred_embeddings_fp32.pt").cuda()
+            (
+                sparse_embeddings,
+                dense_embeddings,
+            ) = self.model.lisa_sam.sam.prompt_encoder(
+                points=None,
+                boxes=None,
+                masks=None,
+                text_embeds=pred_embedding.unsqueeze(1),
+            )
+            sparse_embeddings = sparse_embeddings.to(pred_embedding.dtype)
+            image_embeddings = self.model.lisa_sam.sam.get_visual_embs(image)
+            
+            #LISA tensors - 
+            # image_embeddings = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/image_embeddings_fp32.pt").cuda()
+            # sparse_embeddings = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/sparse_embeddings_fp32.pt").cuda()
+            # dense_embeddings = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/dense_embeddings_fp32.pt").cuda()
+            # print(torch.allclose(torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/pe_layer_gaus_mat_fp32.pt"), 
+            #                      self.model.lisa_sam.sam.prompt_encoder.pe_layer.positional_encoding_gaussian_matrix))
+
+            # dense_pe = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/dense_pe_fp32.pt").cuda()
+            # NOTE: this does not work because of dense_pe.
+            dense_pe = self.model.lisa_sam.sam.prompt_encoder.get_dense_pe()
+            low_res_masks, iou_predictions = self.model.lisa_sam.sam.mask_decoder(
+                image_embeddings=image_embeddings,  
+                image_pe=dense_pe,
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=False,
+            )
+            # low_res_mask_lisa = torch.load("/lustre/fsw/llmservice_dev_mcore/shreyasm/multimodal/LISA/low_res_masks_fp32.pt").cuda()
+            # print(torch.allclose(low_res_mask_lisa, low_res_masks))
+
+            pred_mask = self.model.lisa_sam.sam.postprocess_masks(
+                low_res_masks,
+                input_size=resize_list,
+                original_size=original_size_list[0].int(),
+            )
         return pred_mask
