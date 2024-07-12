@@ -13,38 +13,13 @@
 # limitations under the License.
 
 r"""
-
-Script to convert HuggingFace Lisa checkpoints into .nemo file.
+Script to convert HuggingFace LLaVA checkpoints into .nemo file.
   Example to run this conversion script:
-    python convert_hf_lisa_to_nemolisa.py \
+    python convert_hf_llava_to_neva.py \
      --in-file <path_to_hf_checkpoints_folder> \
      --out-file <path_to_output_nemo_file> \
      --tokenizer-model <path_to_sp_tokenizer_model> \
      --conv-template llama_2 # nvgpt, llama_2, v1 (vicuna)
-
-    LISA Model only works with an older version of transformers
-    you would need to install the version: transformers==4.31.0
-    This version doesn't work with Neva model as this version doesnt have the following libraries:
-        - from transformers import SiglipImageProcessor
-        - from transformers import SiglipVisionModel
-    
-    In this fork, i have added the workaround for using the older version transformers in the files:
-    nemo/collections/multimodal/data/neva/neva_dataset.py
-    nemo/collections/multimodal/models/multimodal_llm/neva/neva_model.py
-    nemo/collections/multimodal/parts/utils.py
-
-    For example:
-    try:
-        from transformers import SiglipImageProcessor
-    except:
-        import types
-        # Create a dummy module
-        dummy_module = types.ModuleType('dummy_module')
-        # Add it to sys.modules
-        import sys
-        sys.modules['SiglipImageProcessor'] = dummy_module
-        # Now you can import it without errors
-        import SiglipImageProcessor
 """
 
 import os
@@ -53,12 +28,15 @@ from collections import OrderedDict
 
 import torch
 from model.LISA import LISAForCausalLM
+#from llava import LlavaLlamaForCausalLM
 from omegaconf import OmegaConf
 from pytorch_lightning.core.saving import _load_state as ptl_load_state
 from pytorch_lightning.trainer.trainer import Trainer
 from transformers import AutoTokenizer
+#from transformers import LlamaTokenizer
 
-from nemo.collections.multimodal.models.multimodal_llm.lisa.lisa_model import MegatronLisaModel
+
+from nemo.collections.multimodal.models.multimodal_llm.neva.neva_model import MegatronNevaModel
 from nemo.collections.nlp.parts.nlp_overrides import (
     GradScaler,
     MegatronHalfPrecisionPlugin,
@@ -95,7 +73,6 @@ def load_model(cls, checkpoint, strict, **kwargs):
         if 'cfg' in kwargs:
             model = ptl_load_state(cls, checkpoint, strict=strict, **kwargs)
         else:
-            #import pdb; pdb.set_trace()
             model = cls(cfg=checkpoint[cls.CHECKPOINT_HYPER_PARAMS_KEY], **kwargs)
             for name, module in model.named_parameters():
                 if name in checkpoint['state_dict']:
@@ -135,40 +112,40 @@ def load_model(cls, checkpoint, strict, **kwargs):
     return model
 
 
-def load_config(args, lisa_config):
-    nemo_config = OmegaConf.load(os.path.join(os.path.dirname(__file__), 'conf/lisa_config.yaml')).model
-    nemo_config.mm_cfg.mm_mlp_adapter_type = lisa_config.get('mm_projector_type', 'linear')
-    nemo_config.mm_cfg.vision_encoder.from_pretrained = lisa_config.get(
+def load_config(args, llava_config):
+    nemo_config = OmegaConf.load(os.path.join(os.path.dirname(__file__), 'conf/llava_config.yaml')).model
+    nemo_config.mm_cfg.mm_mlp_adapter_type = llava_config.get('mm_projector_type', 'linear')
+    nemo_config.mm_cfg.vision_encoder.from_pretrained = llava_config.get(
         'mm_vision_tower', 'openai/clip-vit-large-patch14'
     )
     if '336' in nemo_config.mm_cfg.vision_encoder.from_pretrained:
         nemo_config.data.image_token_len = 576
-    nemo_config.encoder_seq_length = lisa_config['max_position_embeddings']
-    nemo_config.num_layers = int(lisa_config['num_hidden_layers'])
-    nemo_config.hidden_size = lisa_config['hidden_size']
-    nemo_config.ffn_hidden_size = lisa_config['intermediate_size']
-    nemo_config.num_attention_heads = lisa_config['num_attention_heads']
-    nemo_config.max_position_embeddings = lisa_config['max_position_embeddings']
-    nemo_config.init_method_std = lisa_config['initializer_range']
-    nemo_config.layernorm_epsilon = lisa_config['rms_norm_eps']
-    if 'num_key_value_heads' in lisa_config:
-        nemo_config.num_query_groups = lisa_config['num_key_value_heads']
+    nemo_config.encoder_seq_length = llava_config['max_position_embeddings']
+    nemo_config.num_layers = int(llava_config['num_hidden_layers'])
+    nemo_config.hidden_size = llava_config['hidden_size']
+    nemo_config.ffn_hidden_size = llava_config['intermediate_size']
+    nemo_config.num_attention_heads = llava_config['num_attention_heads']
+    nemo_config.max_position_embeddings = llava_config['max_position_embeddings']
+    nemo_config.init_method_std = llava_config['initializer_range']
+    nemo_config.layernorm_epsilon = llava_config['rms_norm_eps']
+    if 'num_key_value_heads' in llava_config:
+        nemo_config.num_query_groups = llava_config['num_key_value_heads']
     nemo_config.use_cpu_initialization = True
     nemo_config.activation = 'fast-swiglu'
     nemo_config.data.conv_template = args.conv_template
     nemo_config.mm_cfg.model_type = args.conv_template
     if args.tokenizer_model is None:
-        nemo_config.tokenizer.model = lisa_config['tokenizer_model']
+        nemo_config.tokenizer.model = llava_config['tokenizer_model']
     else:
         nemo_config.tokenizer.model = args.tokenizer_model
-    if lisa_config['rope_scaling'] is not None:
-        if lisa_config['rope_scaling']['type'] == 'linear':
-            nemo_config['seq_len_interpolation_factor'] = lisa_config['rope_scaling']['factor']
+    if llava_config['rope_scaling'] is not None:
+        if llava_config['rope_scaling']['type'] == 'linear':
+            nemo_config['seq_len_interpolation_factor'] = llava_config['rope_scaling']['factor']
         else:
             raise ValueError("Only linear rope scaling type is supported now")
 
     base = 128
-    while lisa_config['vocab_size'] % base != 0:
+    while llava_config['vocab_size'] % base != 0:
         base //= 2
     nemo_config.make_vocab_size_divisible_by = base
 
@@ -184,7 +161,8 @@ def convert(args):
                     padding_side="right",
                     use_fast=False,
                 )
-    
+    #model = LlavaLlamaForCausalLM.from_pretrained(args.in_file)
+    #tokenizer = LlamaTokenizer.from_pretrained(args.in_file)
     tokenizer.pad_token = tokenizer.unk_token
     seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     vision_tower="openai/clip-vit-large-patch14"
@@ -205,14 +183,13 @@ def convert(args):
     hf_config = vars(model.config)
     hf_config['tokenizer_model'] = str(tokenizer.vocab_file)
     print(f"hf_config: {hf_config}")
-    #import pdb; pdb.set_trace()
     print("named parameters:")
     for name, param in model.named_parameters():
         print(f"- {name}")
 
     nemo_config = load_config(args, hf_config)
     print(nemo_config)
-    #import pdb; pdb.set_trace()
+
     if args.precision in ["32", "16"]:
         precision = int(float(args.precision))
     elif args.precision in ["bf16", "bf16-mixed"]:
@@ -273,23 +250,6 @@ def convert(args):
     checkpoint = OrderedDict()
     checkpoint['state_dict'] = OrderedDict()
 
-    # GET SAM and text_hidden
-    # Replace HF: model.visual_model.{} to Nemo: model.lisa_sam.sam.{}
-    # Replace HF: model.text_hidden_fcs.{} to Nemo: model.lisa_sam.text_hidden_fcs.{}
-    sam_layers_list = [layer for layer in model.state_dict().keys() if layer.startswith("model.visual_model")]
-    for layer in sam_layers_list:
-        nemo_layer = layer.replace("model.visual_model", "model.lisa_sam.sam")
-        orig_weight = model.state_dict()[layer]
-        checkpoint['state_dict'][nemo_layer] = param_to_weights(orig_weight)
-    
-    #import pdb; pdb.set_trace()
-
-    text_hidden_fcs_layers_list = [layer for layer in model.state_dict().keys() if layer.startswith("model.text_hidden_fcs")]
-    for layer in text_hidden_fcs_layers_list:
-        nemo_layer = layer.replace("model.text_hidden_fcs", "model.lisa_sam.text_hidden_fcs")
-        orig_weight = model.state_dict()[layer]
-        checkpoint['state_dict'][nemo_layer] = param_to_weights(orig_weight)
-    #import pdb; pdb.set_trace()
     # Multimodal projection
     if mcore_gpt:
         mm_projection_layer_base_name = (
@@ -313,7 +273,6 @@ def convert(args):
         embed_weights_base_name = f'model.language_model.embedding.word_embeddings.weight'
     checkpoint['state_dict'][embed_weights_base_name] = param_to_weights(embed_weight)
 
-    # TODO: check if this param is needed.
     # in hf, this is defined as register_buffer(..., persistent=False) so it won't be in the state dict
     # if f'model.layers.0.self_attn.rotary_emb.inv_freq' in model.state_dict():
     #     rotary_embed_weight = model.state_dict()[f'model.layers.0.self_attn.rotary_emb.inv_freq']
@@ -396,7 +355,7 @@ def convert(args):
 
     final_ln_weight = model.state_dict()[f'model.norm.weight']
     if mcore_gpt:
-        final_ln_base_name = f'model.final_layernorm.weight'
+        final_ln_base_name = f'model.decoder.final_layernorm.weight'
     else:
         final_ln_base_name = f'model.language_model.encoder.final_layernorm.weight'
     checkpoint['state_dict'][final_ln_base_name] = param_to_weights(final_ln_weight)
@@ -408,16 +367,16 @@ def convert(args):
         output_layer_base_name = f'model.language_model.output_layer.weight'
     checkpoint['state_dict'][output_layer_base_name] = param_to_weights(output_layer_weight)
 
-    checkpoint[MegatronLisaModel.CHECKPOINT_HYPER_PARAMS_KEY] = nemo_config
+    checkpoint[MegatronNevaModel.CHECKPOINT_HYPER_PARAMS_KEY] = nemo_config
 
     del model
-    #import pdb; pdb.set_trace()
+
     if nemo_config.get('megatron_amp_O2', False):
         keys = list(checkpoint['state_dict'].keys())
         for key in keys:
             checkpoint['state_dict'][key.replace('model.', 'model.module.', 1)] = checkpoint['state_dict'].pop(key)
-    #import pdb; pdb.set_trace()
-    model = load_model(MegatronLisaModel, checkpoint, strict=False, trainer=trainer)
+
+    model = load_model(MegatronNevaModel, checkpoint, strict=False, trainer=trainer)
 
     model._save_restore_connector = NLPSaveRestoreConnector()
 

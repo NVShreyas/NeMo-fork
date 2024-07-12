@@ -57,6 +57,7 @@ try:
     from megatron.core.transformer.custom_layers.transformer_engine import TENorm
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from megatron.core.models.gpt import GPTModel as MCoreGPTModel
+    from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 
     HAVE_MEGATRON_CORE = True
 
@@ -221,6 +222,10 @@ class LisaBaseModel(nn.Module):
         state_dict = self._load_model_weights(nemo_path)
         print(state_dict)
 
+    def sharded_state_dict(self, prefix: str = '', sharded_offsets: tuple = (), **kwargs):
+        state_dict = self.state_dict(prefix='', keep_vars=True)
+        sharded_state_dict = make_sharded_tensors_for_checkpoint(state_dict, prefix=prefix)
+        return sharded_state_dict
 
 class MCoreLisaModel(MCoreNevaModel):
     def __init__(self, 
@@ -452,6 +457,9 @@ class MegatronLisaModel(MegatronNevaModel):
         media_end_id = self.tokenizer.token_to_id(DEFAULT_IM_END_TOKEN[llm_type])
         seg_token_id = self.tokenizer.token_to_id(DEFAULT_SEG_TOKEN)
 
+        media_start_id = 32001
+        media_end_id = 32002
+        seg_token_id = 32003
         if not parallel_state.is_initialized():
             def dummy():
                 return
@@ -678,13 +686,13 @@ class MegatronLisaModel(MegatronNevaModel):
         sampling_params: SamplingParam = None,
     ) -> OutputType:
         IGNORE_INDEX = -1
-        IMAGE_TOKEN_INDEX = 32003
+        IMAGE_TOKEN_INDEX = 32000
         IMAGE_TOKEN = "<image>"
         # Updated to follow neva
         # DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
         # DEFAULT_IM_START_TOKEN = "<im_start>"
         # DEFAULT_IM_END_TOKEN = "<im_end>"
-        IMAGE_PATCH_TOKEN = "<extra_id_3>" #defaultdict(lambda: "<extra_id_3>")
+        IMAGE_PATCH_TOKEN = "<extra_id_0>" #defaultdict(lambda: "<extra_id_3>")
         IM_START_TOKEN = "<extra_id_1>" #defaultdict(lambda: "<extra_id_4>")
         IM_END_TOKEN = "<extra_id_2>" #defaultdict(lambda: "<extra_id_5>")
         media_start_id = 32001
@@ -700,8 +708,9 @@ class MegatronLisaModel(MegatronNevaModel):
             self.trainer.strategy.setup_environment()
 
         llm_type = self.cfg.mm_cfg.llm.get("model_type", "nvgpt")
+        #llm_type = "v1"
         #seg_token_id = self.tokenizer.token_to_id("[SEG]")
-        seg_token_id = self.tokenizer.token_to_id("<extra_id_0>")
+        seg_token_id = self.tokenizer.token_to_id("<extra_id_3>")
         prompt = input_prompts[0]["prompt"]
         image_clip = input_prompts[0]["image_clip"]
         image = input_prompts[0]["image"]
@@ -720,7 +729,7 @@ class MegatronLisaModel(MegatronNevaModel):
                 width_num_patches += 1
         
         total_num_patches = height_num_patches * width_num_patches
-        template_type="llava_llama_2"
+        template_type="v1"
         conv = conversation_lib.conv_templates[template_type].copy()
         conv.messages = []
         conv.append_message(conv.roles[0], prompt)
@@ -730,9 +739,11 @@ class MegatronLisaModel(MegatronNevaModel):
         replace_token = (
             IM_START_TOKEN + IMAGE_PATCH_TOKEN * total_num_patches + IM_END_TOKEN
         )
+        #modified_conversations.append(custom_prompts.replace(IMAGE_TOKEN, replace_token))
         modified_conversations.append(conversation.replace(IMAGE_TOKEN, replace_token))
         tokens = tokenize(texts=modified_conversations, tokenizer=self.tokenizer, context_length=context_length, add_extra_token=False)
-        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
+        
+        tokens[tokens == 32000] = 0  # DEFAULT_IMAGE_PATCH_TOKEN
         tokens[tokens == 32006] = 1  # <s>
         tokens[tokens == 32007] = 2  # </s>
         tokens = F.pad(tokens, (0, 1), 'constant', 0)
@@ -762,7 +773,7 @@ class MegatronLisaModel(MegatronNevaModel):
                     gpt_output_layer_weight = self.model.module.decoder.embedding.word_embeddings.weight
                 gpt_logits, _ = self.model.module.output_layer(neva_output, weight=gpt_output_layer_weight)
 
-                new_token_id = gpt_logits.squeeze()[-1].argmax()
+                new_token_id = gpt_logits.squeeze()[-1][:32004].argmax()
                 new_token_value = self.tokenizer.ids_to_tokens([new_token_id.item()])
                 print(f"Generated Token ID: {new_token_id.item()}, token: {new_token_value[0]}")
                 user_input = input("Enter 0 to exit, 1 to continue: ")

@@ -69,7 +69,7 @@ model:
   mm_cfg:
     llm:
       from_pretrained: null # path to nemo checkpoint
-      freeze: True
+      freeze: False
       model_type: llama_2 # `nvgpt` or `llama_2` supported
     vision_encoder:
       from_pretrained: "" # path or name
