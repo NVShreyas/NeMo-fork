@@ -284,7 +284,6 @@ class MCoreLisaModel(MCoreNevaModel):
         if image_embeddings.dim() == 3:
             # WHY?
             image_embeddings = image_embeddings.unsqueeze(0)
-        # LISA Dim: torch.Size([2, 256, 64, 64])
 
         seg_token_mask = input_ids[:, 1:] == self.seg_token_id
         seg_token_mask = torch.cat(
@@ -321,6 +320,8 @@ class MCoreLisaModel(MCoreNevaModel):
         resizes = kwargs.pop("resize", None)
         mask_shapes = kwargs.pop("mask_shapes", None)
         gt_masks_labels = kwargs.pop("masks", None)
+        
+        # make sure we are getting the hidden states from the last PP stage in MCore.
         neva_output = super().forward(*args, **kwargs)
 
         neva_output = self.final_layernorm(neva_output)
@@ -328,15 +329,12 @@ class MCoreLisaModel(MCoreNevaModel):
         if self.share_embeddings_and_output_weights:
             gpt_output_layer_weight = self.decoder.embedding.word_embeddings.weight
         gpt_logits, _ = self.output_layer(neva_output, weight=gpt_output_layer_weight)
-        #import pdb; pdb.set_trace()
+
         neva_output = torch.transpose(neva_output, 0, 1)
         hidden_states = []
-        # make sure we are getting the hidden states from the last PP stage in MCore.
-        #import pdb; pdb.set_trace()
         hidden_states.append(self.lisa_sam.text_hidden_fcs[0](neva_output))
         
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
-        
         # embedding corresponding to seg token -> [b*n_s, 256]
         pred_embeddings = last_hidden_state[seg_token_mask]
 
@@ -375,7 +373,6 @@ class MCoreLisaModel(MCoreNevaModel):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
-
             pred_mask = self.lisa_sam.sam.postprocess_masks(
                 low_res_masks,
                 input_size=resizes[i],
@@ -401,7 +398,7 @@ class MCoreLisaModel(MCoreNevaModel):
                        bce_loss_weight=2.0):
 
         lm_loss = 0
-        #language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
+        language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
         mask_bce_loss = 0
         mask_dice_loss = 0
         num_masks = 0

@@ -16,10 +16,10 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 # DEFAULT_IM_START_TOKEN = "<im_start>"
 # DEFAULT_IM_END_TOKEN = "<im_end>"
 # DEFAULT_SEG_TOKEN = "[SEG]"
-DEFAULT_IMAGE_PATCH_TOKEN = "<extra_id_3>" #defaultdict(lambda: "<extra_id_3>")
+DEFAULT_IMAGE_PATCH_TOKEN = "<extra_id_0>" #defaultdict(lambda: "<extra_id_3>")
 DEFAULT_IM_START_TOKEN = "<extra_id_1>" #defaultdict(lambda: "<extra_id_4>")
 DEFAULT_IM_END_TOKEN = "<extra_id_2>" #defaultdict(lambda: "<extra_id_5>")
-DEFAULT_SEG_TOKEN = "<extra_id_0>"
+DEFAULT_SEG_TOKEN = "<extra_id_3>"
 
 SHORT_QUESTION_LIST = [
     DEFAULT_IMAGE_TOKEN + "\n" + "Can you segment the {class_name} in this image?",

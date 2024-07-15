@@ -307,7 +307,7 @@ class ReasonSegDataset(torch.utils.data.Dataset):
         ## tokenizer.convert_ids_to_tokens([32000, 32001, 32002])
         ## ['[SEG]', '<im_start>', '<im_end>'] 
         ## <extra_id_0>, <extra_id_1>, <extra_id_2>
-        tokens[tokens == 32003] = 0  # DEFAULT_IMAGE_PATCH_TOKEN. embeddings for these tokens are replaced by image features.
+        tokens[tokens == 32000] = 0  # DEFAULT_IMAGE_PATCH_TOKEN. embeddings for these tokens are replaced by image features.
         tokens[tokens == 32006] = 1  # <s>
         tokens[tokens == 32007] = 2  # </s>
         labels = tokens.clone().detach()
