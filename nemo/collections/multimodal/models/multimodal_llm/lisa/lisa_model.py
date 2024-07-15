@@ -110,7 +110,7 @@ class SAM(nn.Module):
                     )
     
     def freeze(self, mm_cfg):
-        if mm_cfg.vision_encoder.freeze:
+        if mm_cfg.sam_extra_args.encoder.freeze:
             self.image_encoder.freeze()
             self.prompt_encoder.freeze()
         if mm_cfg.vision_decoder.freeze:

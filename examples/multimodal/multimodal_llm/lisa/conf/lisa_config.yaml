@@ -97,6 +97,7 @@ model:
         vit_patch_size: 16
         prompt_embed_dim: 256
         attention_window_size: 14
+        freeze: False
       decoder:
         depth: 2
         mlp_dim: 2048
