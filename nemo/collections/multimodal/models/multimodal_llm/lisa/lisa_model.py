@@ -320,6 +320,7 @@ class MCoreLisaModel(MCoreNevaModel):
         resizes = kwargs.pop("resize", None)
         mask_shapes = kwargs.pop("mask_shapes", None)
         gt_masks_labels = kwargs.pop("masks", None)
+        lm_loss_mask = kwargs.pop('loss_mask', None).view(-1).float()
         
         # make sure we are getting the hidden states from the last PP stage in MCore.
         neva_output = super().forward(*args, **kwargs)
@@ -382,7 +383,7 @@ class MCoreLisaModel(MCoreNevaModel):
 
         if gt_masks_labels != None and "labels" in kwargs:
             # last PP stage or not inference
-            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels, mask_shapes)
+            return self.compute_losses(pred_masks, gpt_logits, kwargs["labels"], gt_masks_labels, mask_shapes, lm_loss_mask)
 
         pred_masks = torch.stack(pred_masks, dim=0)
         return gpt_logits.transpose(0, 1).contiguous()#, pred_masks
@@ -393,12 +394,13 @@ class MCoreLisaModel(MCoreNevaModel):
                        gpt_labels: torch.Tensor,
                        gt_masks: torch.Tensor,
                        mask_shapes: torch.Tensor,
+                       lm_loss_mask: torch.Tensor,
                        lm_loss_weight=1.0,
                        dice_loss_weight=0.5,
                        bce_loss_weight=2.0):
 
-        lm_loss = 0
-        language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
+        lm_loss = language_model_loss(gpt_labels, gpt_logits) * lm_loss_weight
+        lm_loss = torch.sum(lm_loss.view(-1).float() * lm_loss_mask) / lm_loss_mask.sum()
         mask_bce_loss = 0
         mask_dice_loss = 0
         num_masks = 0
@@ -635,8 +637,8 @@ class MegatronLisaModel(MegatronNevaModel):
         )
 
     def get_forward_output_and_loss_func(self, validation_step=False, tuning=False):
-        def loss_func(output_tensor, loss_mask):
-            loss_for_ub = self.loss_func(loss_mask, output_tensor)
+        def loss_func(output_tensor):
+            loss_for_ub = output_tensor
             if validation_step and not self.cfg.data.get('validation_drop_last', True):
                 raise NotImplementedError(f"`validation_drop_last=False` is not implemented in Lisa!")
             else:
@@ -669,11 +671,12 @@ class MegatronLisaModel(MegatronNevaModel):
                 "mask_shapes": batch["mask_shapes"],
                 "resize": batch["resizes"],
                 "offset": batch["offsets"],
+                "loss_mask": batch['loss_mask'],
             }
 
             output_tensor = model(**forward_args)
 
-            return output_tensor, partial(loss_func, loss_mask=batch['loss_mask'])
+            return output_tensor, loss_func
         
         return fwd_output_and_loss_func
     
