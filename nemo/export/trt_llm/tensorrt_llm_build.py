@@ -66,15 +66,17 @@ def build_and_save_engine(
     plugin_config = PluginConfig()
     plugin_config.gpt_attention_plugin = gpt_attention_plugin
     plugin_config.gemm_plugin = gemm_plugin
-    plugin_config.set_nccl_plugin(use_custom_all_reduce=use_custom_all_reduce)
-    plugin_config.multi_block_mode = enable_multi_block_mode
+    plugin_config.set_nccl_plugin(dtype="auto")
+    # plugin_config.multi_block_mode = enable_multi_block_mode
     if paged_kv_cache:
         plugin_config.enable_paged_kv_cache(tokens_per_block=tokens_per_block)
     else:
         plugin_config.paged_kv_cache = False
-    plugin_config.remove_input_padding = remove_input_padding
-    plugin_config.use_paged_context_fmha = paged_context_fmha
-    plugin_config.multiple_profiles = multiple_profiles
+    plugin_config._remove_input_padding = remove_input_padding
+    plugin_config._use_paged_context_fmha = paged_context_fmha
+    plugin_config._multiple_profiles = multiple_profiles
+    plugin_config._context_fmha = True
+    plugin_config._paged_kv_cache = True
 
     max_num_tokens, opt_num_tokens = check_max_num_tokens(
         max_num_tokens=max_num_tokens,

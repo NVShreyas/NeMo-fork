@@ -494,6 +494,8 @@ class Serialization(ABC):
             prev_error = ""
             # Attempt class path resolution from config `target` class (if it exists)
             if 'target' in config:
+                if config["target"].startswith("nemo_aligner"):
+                    config["target"] = "nemo.collections.nlp.models.language_modeling.megatron_gpt_model.MegatronGPTModel"
                 target_cls = config["target"]  # No guarantee that this is a omegaconf class
                 imported_cls = None
                 try:
